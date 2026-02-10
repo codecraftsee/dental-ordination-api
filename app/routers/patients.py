@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models.user import User, UserRole
 from app.models.patient import Patient
 from app.schemas.patient import PatientCreate, PatientUpdate, PatientResponse
-from app.dependencies import get_current_user, require_admin_or_doctor, require_staff
+from app.dependencies import get_current_user, require_admin, require_admin_or_doctor, require_staff
 
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 
