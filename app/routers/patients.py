@@ -1,5 +1,4 @@
 from typing import Annotated, List, Optional
-from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -49,7 +48,7 @@ def create_patient(
 
 @router.get("/{patient_id}", response_model=PatientResponse)
 def get_patient(
-    patient_id: UUID,
+    patient_id: str,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)]
 ):
@@ -73,7 +72,7 @@ def get_patient(
 
 @router.put("/{patient_id}", response_model=PatientResponse)
 def update_patient(
-    patient_id: UUID,
+    patient_id: str,
     patient_data: PatientUpdate,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin_or_doctor)]
@@ -96,7 +95,7 @@ def update_patient(
 
 @router.delete("/{patient_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_patient(
-    patient_id: UUID,
+    patient_id: str,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)]
 ):

@@ -1,5 +1,4 @@
 from typing import Annotated, List, Optional
-from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -47,7 +46,7 @@ def create_treatment(
 
 @router.get("/{treatment_id}", response_model=TreatmentResponse)
 def get_treatment(
-    treatment_id: UUID,
+    treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_staff)]
 ):
@@ -62,7 +61,7 @@ def get_treatment(
 
 @router.put("/{treatment_id}", response_model=TreatmentResponse)
 def update_treatment(
-    treatment_id: UUID,
+    treatment_id: str,
     treatment_data: TreatmentUpdate,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin_or_doctor)]
@@ -97,7 +96,7 @@ def update_treatment(
 
 @router.delete("/{treatment_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_treatment(
-    treatment_id: UUID,
+    treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)]
 ):
