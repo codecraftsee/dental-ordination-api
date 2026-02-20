@@ -20,7 +20,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:4200",
-        "https://codecraftsee.github.io"
+        "https://codecraftsee.github.io",
+        "https://dental-ordination-api.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
