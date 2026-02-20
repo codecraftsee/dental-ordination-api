@@ -1,5 +1,4 @@
 from typing import Annotated, List, Optional
-from uuid import UUID
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
@@ -17,8 +16,8 @@ router = APIRouter(prefix="/api/visits", tags=["visits"])
 def list_visits(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
-    patient_id: Optional[UUID] = Query(None),
-    doctor_id: Optional[UUID] = Query(None),
+    patient_id: Optional[str] = Query(None),
+    doctor_id: Optional[str] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None)
 ):
@@ -61,7 +60,7 @@ def create_visit(
 
 @router.get("/{visit_id}", response_model=VisitResponse)
 def get_visit(
-    visit_id: UUID,
+    visit_id: str,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)]
 ):
@@ -86,7 +85,7 @@ def get_visit(
 
 @router.put("/{visit_id}", response_model=VisitResponse)
 def update_visit(
-    visit_id: UUID,
+    visit_id: str,
     visit_data: VisitUpdate,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin_or_doctor)]
@@ -109,7 +108,7 @@ def update_visit(
 
 @router.delete("/{visit_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_visit(
-    visit_id: UUID,
+    visit_id: str,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)]
 ):

@@ -1,5 +1,4 @@
 from typing import Annotated, List
-from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -47,7 +46,7 @@ def create_user(
 
 @router.get("/{user_id}", response_model=UserResponse)
 def get_user(
-    user_id: UUID,
+    user_id: str,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)]
 ):
@@ -62,7 +61,7 @@ def get_user(
 
 @router.put("/{user_id}", response_model=UserResponse)
 def update_user(
-    user_id: UUID,
+    user_id: str,
     user_data: UserUpdate,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)]
@@ -100,7 +99,7 @@ def update_user(
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(
-    user_id: UUID,
+    user_id: str,
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_admin)]
 ):

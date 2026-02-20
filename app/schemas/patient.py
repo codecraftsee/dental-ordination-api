@@ -33,8 +33,17 @@ class PatientUpdate(BaseModel):
     email: Optional[EmailStr] = None
 
 
-class PatientResponse(PatientBase):
+class PatientResponse(BaseModel):
     id: UUID
+    first_name: str
+    last_name: str
+    parent_name: Optional[str] = None
+    gender: Gender
+    date_of_birth: date
+    address: Optional[str] = None
+    city: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
     user_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
