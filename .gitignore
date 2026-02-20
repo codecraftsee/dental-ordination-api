@@ -28,6 +28,9 @@ dist/
 build/
 *.egg-info/
 
+# Database
+*.db
+
 # Logs
 *.log
 nul

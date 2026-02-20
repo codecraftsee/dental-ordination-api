@@ -1,4 +1,5 @@
 import re
+import logging
 from io import BytesIO
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -36,9 +37,10 @@ def parse_gender(value) -> Gender | None:
     if not value:
         return None
     v = str(value).strip().lower()
+    logging.warning(f"parse_gender: raw={value!r}, normalized={v!r}")
     if v == 'm':
         return Gender.MALE
-    if v == 'z':
+    if v in ('z', 'ž'):
         return Gender.FEMALE
     return None
 
