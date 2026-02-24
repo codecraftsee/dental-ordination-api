@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, users, patients, doctors, diagnoses, treatments, visits, import_xlsx
+from app.routers import auth, users, patients, doctors, diagnoses, treatments, visits, import_xlsx, admin
 from app.database import engine, Base
 from app.models import User
 from app.models.diagnosis import Diagnosis, DiagnosisCategory
@@ -37,6 +37,7 @@ app.include_router(diagnoses.router)
 app.include_router(treatments.router)
 app.include_router(visits.router)
 app.include_router(import_xlsx.router)
+app.include_router(admin.router)
 
 
 @app.on_event("startup")
