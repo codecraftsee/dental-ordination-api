@@ -51,7 +51,7 @@ def on_startup():
         if not admin:
             admin = User(
                 email="admin@dentalclinic.com",
-                password_hash=get_password_hash("admin123"),
+                password_hash=get_password_hash("p5zTCyUJ^B#^Juvy^%bj"),
                 first_name="Admin",
                 last_name="User",
                 role=UserRole.ADMIN
