@@ -71,7 +71,6 @@ def cell_str(value) -> str | None:
     s = str(value).strip()
     return s if s else None
 
-
 @router.post("/xlsx")
 def import_xlsx_files(
     files: List[UploadFile] = File(...),
@@ -82,11 +81,18 @@ def import_xlsx_files(
 
     Each file creates/updates a patient and imports their visit history.
     Requires admin role.
+
+    Fixes applied:
+    - Continuation rows (no date) now carry forward last seen date
+    - Patient lookup includes date_of_birth to avoid name collisions
+    - Per-file commit/rollback so one bad file doesn't affect others
+    - Duplicate check includes treatment_notes for stricter matching
     """
     results = {
         "patients_created": 0,
         "patients_found": 0,
         "visits_created": 0,
+        "visits_skipped": 0,
         "files_processed": 0,
         "errors": [],
     }
@@ -134,7 +140,9 @@ def import_xlsx_files(
 
             gender = parse_gender(gender_raw)
             if not gender:
-                results["errors"].append(f"{filename}: Invalid gender '{gender_raw}', defaulting to male")
+                results["errors"].append(
+                    f"{filename}: Invalid gender '{gender_raw}', defaulting to male"
+                )
                 gender = Gender.MALE
 
             # Handle date_of_birth - could be string or datetime from Excel
@@ -147,13 +155,17 @@ def import_xlsx_files(
                 date_of_birth = parse_date(str(dob_raw) if dob_raw else None)
 
             if not date_of_birth:
-                results["errors"].append(f"{filename}: Invalid DOB '{dob_raw}', using 1900-01-01")
+                results["errors"].append(
+                    f"{filename}: Invalid DOB '{dob_raw}', using 1900-01-01"
+                )
                 date_of_birth = date(1900, 1, 1)
 
             # --- Find or create patient ---
+            # FIX: include date_of_birth in lookup to avoid collisions on same name
             patient = db.query(Patient).filter(
                 Patient.first_name.ilike(first_name),
                 Patient.last_name.ilike(last_name),
+                Patient.date_of_birth == date_of_birth,
             ).first()
 
             if patient:
@@ -171,34 +183,49 @@ def import_xlsx_files(
                     email=email,
                 )
                 db.add(patient)
-                db.flush()  # get patient.id
+                db.flush()  # get patient.id before visit inserts
                 results["patients_created"] += 1
 
             # --- Parse visit rows (row 14+) ---
+            # FIX: carry forward last seen date for continuation rows
             visit_count = 0
+            skipped_count = 0
+            current_date = None  # tracks last valid date seen
+
             for row_idx in range(14, len(rows)):
                 row = rows[row_idx]
                 if not row or len(row) < 1:
                     continue
 
-                # Parse visit date
-                visit_date = None
+                # Try to parse a date from this row
                 raw_date = row[0]
+                parsed_date = None
                 if isinstance(raw_date, datetime):
-                    visit_date = raw_date.date()
+                    parsed_date = raw_date.date()
                 elif isinstance(raw_date, date):
-                    visit_date = raw_date
-                elif isinstance(raw_date, str):
-                    visit_date = parse_date(raw_date)
+                    parsed_date = raw_date
+                elif isinstance(raw_date, str) and raw_date.strip():
+                    parsed_date = parse_date(raw_date)
 
-                if not visit_date:
-                    continue  # Skip rows without a date
+                # Update current_date only when a new date is found
+                if parsed_date:
+                    current_date = parsed_date
+
+                # Skip row if we haven't encountered any date yet
+                if not current_date:
+                    continue
+
+                visit_date = current_date
 
                 diagnosis_notes = cell_str(row[2]) if len(row) > 2 else None
                 treatment_notes = cell_str(row[4]) if len(row) > 4 else None
                 doctor_initial = cell_str(row[5]) if len(row) > 5 else None
                 tooth_number = extract_tooth_number(diagnosis_notes)
                 price = parse_price(row)
+
+                # Skip rows with no meaningful content
+                if not diagnosis_notes and not treatment_notes:
+                    continue
 
                 # Resolve doctor
                 doctor_id = default_doctor_id
@@ -213,6 +240,18 @@ def import_xlsx_files(
                     )
                     continue
 
+                # FIX: stricter duplicate check — includes treatment_notes
+                exists = db.query(Visit).filter(
+                    Visit.patient_id == patient.id,
+                    Visit.date == visit_date,
+                    Visit.diagnosis_notes == diagnosis_notes,
+                    Visit.treatment_notes == treatment_notes,
+                ).first()
+
+                if exists:
+                    skipped_count += 1
+                    continue
+
                 visit = Visit(
                     patient_id=patient.id,
                     doctor_id=doctor_id,
@@ -225,12 +264,16 @@ def import_xlsx_files(
                 db.add(visit)
                 visit_count += 1
 
+            # FIX: commit per file so one failure doesn't roll back others
+            db.commit()
+
             results["visits_created"] += visit_count
+            results["visits_skipped"] += skipped_count
             results["files_processed"] += 1
 
         except Exception as e:
+            db.rollback()  # FIX: rollback only this file on error
             results["errors"].append(f"{filename}: {str(e)}")
             continue
 
-    db.commit()
     return results
