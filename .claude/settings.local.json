@@ -4,7 +4,11 @@
       "Bash(C:/Users/Miodrag/development/dental-ordination-api/venv/Scripts/uvicorn.exe app.main:app --reload --port 8000)",
       "Bash(C:/Users/Miodrag/development/dental-ordination-api/venv/Scripts/pip.exe install:*)",
       "Bash(venv/Scripts/python.exe:*)",
-      "Bash(venv/Scripts/uvicorn.exe:*)"
+      "Bash(venv/Scripts/uvicorn.exe:*)",
+      "WebFetch(domain:dental-ordination-api.onrender.com)",
+      "WebFetch(domain:codecraftsee.github.io)",
+      "Bash(openspec status:*)",
+      "Bash(openspec instructions tasks:*)"
     ]
   }
 }
