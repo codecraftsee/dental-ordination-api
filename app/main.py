@@ -8,6 +8,8 @@ from app.models.treatment import Treatment, TreatmentCategory
 from app.services.auth import get_password_hash
 from app.models.user import UserRole
 from sqlalchemy.orm import Session
+import sqlalchemy
+from sqlalchemy import inspect
 
 app = FastAPI(
     title="Dental Ordination API",
@@ -44,6 +46,16 @@ app.include_router(admin.router)
 def on_startup():
     # Create tables
     Base.metadata.create_all(bind=engine)
+
+    # Add 'paid' column to visits if it doesn't exist (no Alembic)
+    insp = inspect(engine)
+    if "visits" in insp.get_table_names():
+        columns = [c["name"] for c in insp.get_columns("visits")]
+        if "paid" not in columns:
+            with engine.begin() as conn:
+                conn.execute(
+                    sqlalchemy.text("ALTER TABLE visits ADD COLUMN paid BOOLEAN NOT NULL DEFAULT FALSE")
+                )
 
     # Create default admin user if not exists
     with Session(engine) as db:
