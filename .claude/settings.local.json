@@ -8,7 +8,9 @@
       "WebFetch(domain:dental-ordination-api.onrender.com)",
       "WebFetch(domain:codecraftsee.github.io)",
       "Bash(openspec status:*)",
-      "Bash(openspec instructions tasks:*)"
+      "Bash(openspec instructions tasks:*)",
+      "Bash(openspec instructions:*)",
+      "Bash(rm:*)"
     ]
   }
 }
