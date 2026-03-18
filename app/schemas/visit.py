@@ -15,7 +15,7 @@ class VisitBase(BaseModel):
     treatment_id: Optional[UUID] = None
     treatment_notes: Optional[str] = None
     price: Optional[Decimal] = None
-    paid: bool = False
+    paid: bool = True
 
 
 class VisitCreate(VisitBase):

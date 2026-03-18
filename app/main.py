@@ -1,5 +1,9 @@
-from fastapi import FastAPI
+import logging
+import traceback
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.routers import auth, users, patients, doctors, diagnoses, treatments, visits, import_xlsx, admin
 from app.database import engine, Base
 from app.models import User
@@ -11,11 +15,25 @@ from sqlalchemy.orm import Session
 import sqlalchemy
 from sqlalchemy import inspect
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="Dental Ordination API",
     description="Backend API for Dental Ordination management system",
     version="1.0.0"
 )
+
+
+@app.middleware("http")
+async def log_exceptions(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as exc:
+        logger.error(f"{request.method} {request.url.path} failed: {exc}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 # CORS configuration
 app.add_middleware(

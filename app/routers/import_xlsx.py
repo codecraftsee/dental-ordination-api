@@ -54,11 +54,35 @@ def extract_tooth_number(diagnosis_text: str) -> int | None:
 
 
 def parse_price(row: list, price_idx: int = 6, fallback_idx: int = 7) -> Decimal | None:
-    """Extract price from row, with fallback column."""
+    """Extract price from row, with fallback column.
+
+    Handles formats like: 4000, 4000.00, 4,000.00 Din., 4.000,00 din
+    """
     for idx in [price_idx, fallback_idx]:
         if idx < len(row) and row[idx] is not None:
+            raw = str(row[idx]).strip()
+            # Remove currency suffix (e.g. "Din.", "din", "RSD")
+            raw = re.sub(r'[A-Za-z.]+$', '', raw).strip()
+            if not raw:
+                continue
+            # Determine format by looking at last separator
+            # "4.000,00" -> European (dot=thousands, comma=decimal)
+            # "4,000.00" -> US (comma=thousands, dot=decimal)
+            # "4000,00"  -> European no thousands sep
+            # "4000.00"  -> US no thousands sep
+            last_dot = raw.rfind('.')
+            last_comma = raw.rfind(',')
+            if last_comma > last_dot:
+                # European: dots are thousands, comma is decimal
+                raw = raw.replace('.', '').replace(',', '.')
+            elif last_dot > last_comma:
+                # US: commas are thousands, dot is decimal
+                raw = raw.replace(',', '')
+            else:
+                # No separators or only one type — try as-is
+                raw = raw.replace(',', '.')
             try:
-                return Decimal(str(row[idx]))
+                return Decimal(raw)
             except (InvalidOperation, ValueError):
                 continue
     return None
@@ -260,6 +284,7 @@ def import_xlsx_files(
                     diagnosis_notes=diagnosis_notes,
                     treatment_notes=treatment_notes,
                     price=price,
+                    paid=True,
                 )
                 db.add(visit)
                 visit_count += 1

@@ -29,4 +29,4 @@ class Patient(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", backref="patient_profile")
-    visits = relationship("Visit", back_populates="patient")
+    visits = relationship("Visit", back_populates="patient", cascade="all, delete-orphan")
