@@ -10,7 +10,13 @@
       "Bash(openspec status:*)",
       "Bash(openspec instructions tasks:*)",
       "Bash(openspec instructions:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(find . -name \"__pycache__\" -type d -exec rm -rf {} + 2>/dev/null; echo \"cleared pycache\")",
+      "Bash(tasklist | grep -i uvicorn 2>/dev/null || tasklist | grep -i python)",
+      "Bash(taskkill //F //PID 8316 2>/dev/null; taskkill //F //PID 21260 2>/dev/null; echo \"killed\")",
+      "Bash(taskkill //F //IM uvicorn.exe 2>/dev/null; taskkill //F //IM python.exe 2>/dev/null; echo \"done\")",
+      "Bash(find . -type d -name \"__pycache__\" -exec rm -rf {} + 2>/dev/null; find . -name \"*.pyc\" -delete 2>/dev/null; echo \"all pycache cleared\")",
+      "Bash(git add:*)"
     ]
   }
 }
