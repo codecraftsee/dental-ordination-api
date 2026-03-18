@@ -18,7 +18,7 @@ class Visit(Base):
     treatment_id = Column(String(36), ForeignKey("treatments.id"), nullable=True)
     treatment_notes = Column(Text, nullable=True)
     price = Column(Numeric(10, 2), nullable=True)
-    paid = Column(Boolean, default=False, server_default="0", nullable=False)
+    paid = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

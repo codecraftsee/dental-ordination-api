@@ -105,5 +105,12 @@ def delete_patient(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Patient not found"
         )
-    db.delete(patient)
-    db.commit()
+    try:
+        db.delete(patient)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
