@@ -118,6 +118,14 @@ async def import_xlsx_files(
     - file_done: emitted after each file completes (success or per-file error)
     - complete: emitted once after all files are processed, with the full summary
     """
+    # Read all file contents eagerly before returning StreamingResponse.
+    # UploadFile handles are closed by FastAPI once the endpoint returns,
+    # so they cannot be awaited inside the async generator.
+    file_data: list[tuple[str, bytes]] = []
+    for upload_file in files:
+        content = await upload_file.read()
+        file_data.append((upload_file.filename or "unknown", content))
+
     async def generate():
         summary = {
             "patients_created": 0,
@@ -129,7 +137,7 @@ async def import_xlsx_files(
         }
 
         try:
-            total = len(files)
+            total = len(file_data)
 
             # Pre-load doctors for initial matching
             doctors = db.query(Doctor).all()
@@ -140,8 +148,7 @@ async def import_xlsx_files(
                     doctor_map[initial] = doc.id
             default_doctor_id = doctors[0].id if doctors else None
 
-            for i, upload_file in enumerate(files):
-                filename = upload_file.filename or "unknown"
+            for i, (filename, content) in enumerate(file_data):
 
                 yield _sse({
                     "type": "progress",
@@ -160,7 +167,6 @@ async def import_xlsx_files(
                 }
 
                 try:
-                    content = await upload_file.read()
                     wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
                     ws = wb.active
 

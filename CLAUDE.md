@@ -54,7 +54,12 @@ venv/Scripts/uvicorn.exe app.main:app --reload
 - `DELETE /api/admin/visits|patients|doctors|diagnoses|treatments|all`
 
 ### Import
-- `POST /api/import/xlsx` — import patient dental cards from XLSX files
+- `POST /api/import/xlsx` — import patient dental cards from XLSX files (admin only)
+  - Accepts one or more `multipart/form-data` files (`files` field)
+  - Streams **Server-Sent Events** (`text/event-stream`) instead of returning a plain JSON response
+  - Event types: `progress` (before each file), `file_done` (after each file), `complete` (final summary)
+  - Frontend must consume via `fetch()` + `ReadableStream` (not `EventSource`, which is GET-only)
+  - Each file is committed/rolled back independently; errors appear in the event payload, not as HTTP errors
 
 ## Key Files
 - `app/main.py` — app entry point, startup seeds admin + diagnoses + treatments
