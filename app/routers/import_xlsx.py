@@ -8,10 +8,9 @@ from typing import Annotated, List
 
 from fastapi import APIRouter, Depends, UploadFile, File
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 
-from app.database import get_db
+from app.database import SessionLocal
 from app.dependencies import require_admin
 from app.models.user import User
 from app.models.patient import Patient, Gender
@@ -105,7 +104,6 @@ def _sse(data: dict) -> str:
 @router.post("/xlsx")
 async def import_xlsx_files(
     files: List[UploadFile] = File(...),
-    db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
     """Import one or more XLSX dental card files, streaming progress via SSE.
@@ -120,13 +118,13 @@ async def import_xlsx_files(
     """
     # Read all file contents eagerly before returning StreamingResponse.
     # UploadFile handles are closed by FastAPI once the endpoint returns,
-    # so they cannot be awaited inside the async generator.
+    # so they cannot be awaited inside the generator.
     file_data: list[tuple[str, bytes]] = []
     for upload_file in files:
         content = await upload_file.read()
         file_data.append((upload_file.filename or "unknown", content))
 
-    async def generate():
+    def generate():
         summary = {
             "patients_created": 0,
             "patients_found": 0,
@@ -139,14 +137,18 @@ async def import_xlsx_files(
         try:
             total = len(file_data)
 
-            # Pre-load doctors for initial matching
-            doctors = db.query(Doctor).all()
-            doctor_map: dict[str, str] = {}  # initial letter -> doctor id
-            for doc in doctors:
-                initial = doc.first_name[0].upper() if doc.first_name else ""
-                if initial and initial not in doctor_map:
-                    doctor_map[initial] = doc.id
-            default_doctor_id = doctors[0].id if doctors else None
+            # Pre-load doctors for initial matching using a short-lived session
+            db = SessionLocal()
+            try:
+                doctors = db.query(Doctor).all()
+                doctor_map: dict[str, str] = {}  # initial letter -> doctor id
+                for doc in doctors:
+                    initial = doc.first_name[0].upper() if doc.first_name else ""
+                    if initial and initial not in doctor_map:
+                        doctor_map[initial] = doc.id
+                default_doctor_id = doctors[0].id if doctors else None
+            finally:
+                db.close()
 
             for i, (filename, content) in enumerate(file_data):
 
@@ -165,7 +167,9 @@ async def import_xlsx_files(
                     "visits_created": 0,
                     "visits_skipped": 0,
                 }
+                committed = False
 
+                db = SessionLocal()
                 try:
                     wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
                     ws = wb.active
@@ -216,7 +220,6 @@ async def import_xlsx_files(
                                 date_of_birth = date(1900, 1, 1)
 
                             # --- Find or create patient ---
-                            # FIX: include date_of_birth in lookup to avoid collisions on same name
                             patient = db.query(Patient).filter(
                                 Patient.first_name.ilike(first_name),
                                 Patient.last_name.ilike(last_name),
@@ -242,7 +245,6 @@ async def import_xlsx_files(
                                 file_result["patients_created"] += 1
 
                             # --- Parse visit rows (row 14+) ---
-                            # FIX: carry forward last seen date for continuation rows
                             visit_count = 0
                             skipped_count = 0
                             current_date = None  # tracks last valid date seen
@@ -295,7 +297,6 @@ async def import_xlsx_files(
                                     )
                                     continue
 
-                                # FIX: stricter duplicate check — includes treatment_notes
                                 exists = db.query(Visit).filter(
                                     Visit.patient_id == patient.id,
                                     Visit.date == visit_date,
@@ -323,16 +324,26 @@ async def import_xlsx_files(
                             file_result["visits_created"] = visit_count
                             file_result["visits_skipped"] = skipped_count
 
-                    # FIX: commit per file so one failure doesn't roll back others
                     db.commit()
+                    committed = True
 
                 except Exception as e:
-                    db.rollback()  # FIX: rollback only this file on error
+                    db.rollback()
                     file_errors.append(f"{filename}: {str(e)}")
+                    # Reset counts — nothing was persisted for this file
+                    file_result = {
+                        "patients_created": 0,
+                        "patients_found": 0,
+                        "visits_created": 0,
+                        "visits_skipped": 0,
+                    }
+                finally:
+                    db.close()
 
-                # Accumulate into summary
-                for key in file_result:
-                    summary[key] += file_result[key]
+                # Only accumulate counts from successfully committed files
+                if committed:
+                    for key in file_result:
+                        summary[key] += file_result[key]
                 summary["errors"].extend(file_errors)
                 summary["files_processed"] += 1
 

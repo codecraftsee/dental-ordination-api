@@ -2,7 +2,7 @@
 
 ## Endpoint
 
-```
+```http
 POST /api/import/xlsx
 Authorization: Bearer <admin token>
 Content-Type: multipart/form-data
@@ -111,7 +111,7 @@ The `summary` shape matches the response that the old (non-streaming) version of
 
 ## Response Headers
 
-```
+```http
 Content-Type: text/event-stream
 Cache-Control: no-cache
 X-Accel-Buffering: no
