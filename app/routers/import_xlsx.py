@@ -141,12 +141,17 @@ async def import_xlsx_files(
             db = SessionLocal()
             try:
                 doctors = db.query(Doctor).all()
-                doctor_map: dict[str, str] = {}  # initial letter -> doctor id
+                doctor_map: dict[str, str | None] = {}  # initial letter -> doctor id
                 for doc in doctors:
                     initial = doc.first_name[0].upper() if doc.first_name else ""
-                    if initial and initial not in doctor_map:
+                    if not initial:
+                        continue
+                    if initial not in doctor_map:
                         doctor_map[initial] = doc.id
-                default_doctor_id = doctors[0].id if doctors else None
+                    else:
+                        # Duplicate initial — mark ambiguous so it surfaces an error
+                        doctor_map[initial] = None
+                default_doctor_id = None
             finally:
                 db.close()
 
