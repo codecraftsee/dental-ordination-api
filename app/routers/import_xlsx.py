@@ -1,4 +1,5 @@
 import re
+import json
 import logging
 from io import BytesIO
 from datetime import date, datetime
@@ -6,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, List
 
 from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from openpyxl import load_workbook
 
@@ -95,210 +97,262 @@ def cell_str(value) -> str | None:
     s = str(value).strip()
     return s if s else None
 
+
+def _sse(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
+
 @router.post("/xlsx")
-def import_xlsx_files(
+async def import_xlsx_files(
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Import one or more XLSX dental card files.
+    """Import one or more XLSX dental card files, streaming progress via SSE.
 
     Each file creates/updates a patient and imports their visit history.
     Requires admin role.
 
-    Fixes applied:
-    - Continuation rows (no date) now carry forward last seen date
-    - Patient lookup includes date_of_birth to avoid name collisions
-    - Per-file commit/rollback so one bad file doesn't affect others
-    - Duplicate check includes treatment_notes for stricter matching
+    Streams three event types:
+    - progress: emitted before each file starts processing
+    - file_done: emitted after each file completes (success or per-file error)
+    - complete: emitted once after all files are processed, with the full summary
     """
-    results = {
-        "patients_created": 0,
-        "patients_found": 0,
-        "visits_created": 0,
-        "visits_skipped": 0,
-        "files_processed": 0,
-        "errors": [],
-    }
-
-    # Pre-load doctors for initial matching
-    doctors = db.query(Doctor).all()
-    doctor_map: dict[str, str] = {}  # initial letter -> doctor id
-    for doc in doctors:
-        initial = doc.first_name[0].upper() if doc.first_name else ""
-        if initial and initial not in doctor_map:
-            doctor_map[initial] = doc.id
-    default_doctor_id = doctors[0].id if doctors else None
-
+    # Read all file contents eagerly before returning StreamingResponse.
+    # UploadFile handles are closed by FastAPI once the endpoint returns,
+    # so they cannot be awaited inside the async generator.
+    file_data: list[tuple[str, bytes]] = []
     for upload_file in files:
-        filename = upload_file.filename or "unknown"
+        content = await upload_file.read()
+        file_data.append((upload_file.filename or "unknown", content))
+
+    async def generate():
+        summary = {
+            "patients_created": 0,
+            "patients_found": 0,
+            "visits_created": 0,
+            "visits_skipped": 0,
+            "files_processed": 0,
+            "errors": [],
+        }
+
         try:
-            content = upload_file.file.read()
-            wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
-            ws = wb.active
+            total = len(file_data)
 
-            # Read all rows as lists of values
-            rows = []
-            for row in ws.iter_rows(values_only=True):
-                rows.append(list(row))
-            wb.close()
+            # Pre-load doctors for initial matching
+            doctors = db.query(Doctor).all()
+            doctor_map: dict[str, str] = {}  # initial letter -> doctor id
+            for doc in doctors:
+                initial = doc.first_name[0].upper() if doc.first_name else ""
+                if initial and initial not in doctor_map:
+                    doctor_map[initial] = doc.id
+            default_doctor_id = doctors[0].id if doctors else None
 
-            if len(rows) < 14:
-                results["errors"].append(f"{filename}: File too short, expected at least 14 rows")
-                continue
+            for i, (filename, content) in enumerate(file_data):
 
-            # --- Parse patient header (rows 2-10, column C = index 2) ---
-            gender_raw = cell_str(rows[2][2]) if len(rows[2]) > 2 else None
-            last_name = cell_str(rows[3][2]) if len(rows[3]) > 2 else None
-            first_name = cell_str(rows[4][2]) if len(rows[4]) > 2 else None
-            parent_name = cell_str(rows[5][2]) if len(rows[5]) > 2 else None
-            dob_raw = rows[6][2] if len(rows[6]) > 2 else None
-            address = cell_str(rows[7][2]) if len(rows[7]) > 2 else None
-            city = cell_str(rows[8][2]) if len(rows[8]) > 2 else None
-            phone = cell_str(rows[9][2]) if len(rows[9]) > 2 else None
-            email = cell_str(rows[10][2]) if len(rows[10]) > 2 else None
+                yield _sse({
+                    "type": "progress",
+                    "current": i + 1,
+                    "total": total,
+                    "file": filename,
+                    "status": "processing",
+                })
 
-            if not first_name or not last_name:
-                results["errors"].append(f"{filename}: Missing patient name")
-                continue
+                file_errors: list[str] = []
+                file_result = {
+                    "patients_created": 0,
+                    "patients_found": 0,
+                    "visits_created": 0,
+                    "visits_skipped": 0,
+                }
 
-            gender = parse_gender(gender_raw)
-            if not gender:
-                results["errors"].append(
-                    f"{filename}: Invalid gender '{gender_raw}', defaulting to male"
-                )
-                gender = Gender.MALE
+                try:
+                    wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
+                    ws = wb.active
 
-            # Handle date_of_birth - could be string or datetime from Excel
-            date_of_birth = None
-            if isinstance(dob_raw, datetime):
-                date_of_birth = dob_raw.date()
-            elif isinstance(dob_raw, date):
-                date_of_birth = dob_raw
-            else:
-                date_of_birth = parse_date(str(dob_raw) if dob_raw else None)
+                    # Read all rows as lists of values
+                    rows = []
+                    for row in ws.iter_rows(values_only=True):
+                        rows.append(list(row))
+                    wb.close()
 
-            if not date_of_birth:
-                results["errors"].append(
-                    f"{filename}: Invalid DOB '{dob_raw}', using 1900-01-01"
-                )
-                date_of_birth = date(1900, 1, 1)
+                    if len(rows) < 14:
+                        file_errors.append(f"{filename}: File too short, expected at least 14 rows")
+                    else:
+                        # --- Parse patient header (rows 2-10, column C = index 2) ---
+                        gender_raw = cell_str(rows[2][2]) if len(rows[2]) > 2 else None
+                        last_name = cell_str(rows[3][2]) if len(rows[3]) > 2 else None
+                        first_name = cell_str(rows[4][2]) if len(rows[4]) > 2 else None
+                        parent_name = cell_str(rows[5][2]) if len(rows[5]) > 2 else None
+                        dob_raw = rows[6][2] if len(rows[6]) > 2 else None
+                        address = cell_str(rows[7][2]) if len(rows[7]) > 2 else None
+                        city = cell_str(rows[8][2]) if len(rows[8]) > 2 else None
+                        phone = cell_str(rows[9][2]) if len(rows[9]) > 2 else None
+                        email = cell_str(rows[10][2]) if len(rows[10]) > 2 else None
 
-            # --- Find or create patient ---
-            # FIX: include date_of_birth in lookup to avoid collisions on same name
-            patient = db.query(Patient).filter(
-                Patient.first_name.ilike(first_name),
-                Patient.last_name.ilike(last_name),
-                Patient.date_of_birth == date_of_birth,
-            ).first()
+                        if not first_name or not last_name:
+                            file_errors.append(f"{filename}: Missing patient name")
+                        else:
+                            gender = parse_gender(gender_raw)
+                            if not gender:
+                                file_errors.append(
+                                    f"{filename}: Invalid gender '{gender_raw}', defaulting to male"
+                                )
+                                gender = Gender.MALE
 
-            if patient:
-                results["patients_found"] += 1
-            else:
-                patient = Patient(
-                    first_name=first_name,
-                    last_name=last_name,
-                    parent_name=parent_name,
-                    gender=gender,
-                    date_of_birth=date_of_birth,
-                    address=address,
-                    city=city,
-                    phone=phone,
-                    email=email,
-                )
-                db.add(patient)
-                db.flush()  # get patient.id before visit inserts
-                results["patients_created"] += 1
+                            # Handle date_of_birth - could be string or datetime from Excel
+                            date_of_birth = None
+                            if isinstance(dob_raw, datetime):
+                                date_of_birth = dob_raw.date()
+                            elif isinstance(dob_raw, date):
+                                date_of_birth = dob_raw
+                            else:
+                                date_of_birth = parse_date(str(dob_raw) if dob_raw else None)
 
-            # --- Parse visit rows (row 14+) ---
-            # FIX: carry forward last seen date for continuation rows
-            visit_count = 0
-            skipped_count = 0
-            current_date = None  # tracks last valid date seen
+                            if not date_of_birth:
+                                file_errors.append(
+                                    f"{filename}: Invalid DOB '{dob_raw}', using 1900-01-01"
+                                )
+                                date_of_birth = date(1900, 1, 1)
 
-            for row_idx in range(14, len(rows)):
-                row = rows[row_idx]
-                if not row or len(row) < 1:
-                    continue
+                            # --- Find or create patient ---
+                            # FIX: include date_of_birth in lookup to avoid collisions on same name
+                            patient = db.query(Patient).filter(
+                                Patient.first_name.ilike(first_name),
+                                Patient.last_name.ilike(last_name),
+                                Patient.date_of_birth == date_of_birth,
+                            ).first()
 
-                # Try to parse a date from this row
-                raw_date = row[0]
-                parsed_date = None
-                if isinstance(raw_date, datetime):
-                    parsed_date = raw_date.date()
-                elif isinstance(raw_date, date):
-                    parsed_date = raw_date
-                elif isinstance(raw_date, str) and raw_date.strip():
-                    parsed_date = parse_date(raw_date)
+                            if patient:
+                                file_result["patients_found"] += 1
+                            else:
+                                patient = Patient(
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    parent_name=parent_name,
+                                    gender=gender,
+                                    date_of_birth=date_of_birth,
+                                    address=address,
+                                    city=city,
+                                    phone=phone,
+                                    email=email,
+                                )
+                                db.add(patient)
+                                db.flush()  # get patient.id before visit inserts
+                                file_result["patients_created"] += 1
 
-                # Update current_date only when a new date is found
-                if parsed_date:
-                    current_date = parsed_date
+                            # --- Parse visit rows (row 14+) ---
+                            # FIX: carry forward last seen date for continuation rows
+                            visit_count = 0
+                            skipped_count = 0
+                            current_date = None  # tracks last valid date seen
 
-                # Skip row if we haven't encountered any date yet
-                if not current_date:
-                    continue
+                            for row_idx in range(14, len(rows)):
+                                row = rows[row_idx]
+                                if not row or len(row) < 1:
+                                    continue
 
-                visit_date = current_date
+                                # Try to parse a date from this row
+                                raw_date = row[0]
+                                parsed_date = None
+                                if isinstance(raw_date, datetime):
+                                    parsed_date = raw_date.date()
+                                elif isinstance(raw_date, date):
+                                    parsed_date = raw_date
+                                elif isinstance(raw_date, str) and raw_date.strip():
+                                    parsed_date = parse_date(raw_date)
 
-                diagnosis_notes = cell_str(row[2]) if len(row) > 2 else None
-                treatment_notes = cell_str(row[4]) if len(row) > 4 else None
-                doctor_initial = cell_str(row[5]) if len(row) > 5 else None
-                tooth_number = extract_tooth_number(diagnosis_notes)
-                price = parse_price(row)
+                                # Update current_date only when a new date is found
+                                if parsed_date:
+                                    current_date = parsed_date
 
-                # Skip rows with no meaningful content
-                if not diagnosis_notes and not treatment_notes:
-                    continue
+                                # Skip row if we haven't encountered any date yet
+                                if not current_date:
+                                    continue
 
-                # Resolve doctor
-                doctor_id = default_doctor_id
-                if doctor_initial:
-                    mapped = doctor_map.get(doctor_initial.upper())
-                    if mapped:
-                        doctor_id = mapped
+                                visit_date = current_date
 
-                if not doctor_id:
-                    results["errors"].append(
-                        f"{filename} row {row_idx + 1}: No doctor found for initial '{doctor_initial}', skipping"
-                    )
-                    continue
+                                diagnosis_notes = cell_str(row[2]) if len(row) > 2 else None
+                                treatment_notes = cell_str(row[4]) if len(row) > 4 else None
+                                doctor_initial = cell_str(row[5]) if len(row) > 5 else None
+                                tooth_number = extract_tooth_number(diagnosis_notes)
+                                price = parse_price(row)
 
-                # FIX: stricter duplicate check — includes treatment_notes
-                exists = db.query(Visit).filter(
-                    Visit.patient_id == patient.id,
-                    Visit.date == visit_date,
-                    Visit.diagnosis_notes == diagnosis_notes,
-                    Visit.treatment_notes == treatment_notes,
-                ).first()
+                                # Skip rows with no meaningful content
+                                if not diagnosis_notes and not treatment_notes:
+                                    continue
 
-                if exists:
-                    skipped_count += 1
-                    continue
+                                # Resolve doctor
+                                doctor_id = default_doctor_id
+                                if doctor_initial:
+                                    mapped = doctor_map.get(doctor_initial.upper())
+                                    if mapped:
+                                        doctor_id = mapped
 
-                visit = Visit(
-                    patient_id=patient.id,
-                    doctor_id=doctor_id,
-                    date=visit_date,
-                    tooth_number=tooth_number,
-                    diagnosis_notes=diagnosis_notes,
-                    treatment_notes=treatment_notes,
-                    price=price,
-                    paid=True,
-                )
-                db.add(visit)
-                visit_count += 1
+                                if not doctor_id:
+                                    file_errors.append(
+                                        f"{filename} row {row_idx + 1}: No doctor found for initial '{doctor_initial}', skipping"
+                                    )
+                                    continue
 
-            # FIX: commit per file so one failure doesn't roll back others
-            db.commit()
+                                # FIX: stricter duplicate check — includes treatment_notes
+                                exists = db.query(Visit).filter(
+                                    Visit.patient_id == patient.id,
+                                    Visit.date == visit_date,
+                                    Visit.diagnosis_notes == diagnosis_notes,
+                                    Visit.treatment_notes == treatment_notes,
+                                ).first()
 
-            results["visits_created"] += visit_count
-            results["visits_skipped"] += skipped_count
-            results["files_processed"] += 1
+                                if exists:
+                                    skipped_count += 1
+                                    continue
+
+                                visit = Visit(
+                                    patient_id=patient.id,
+                                    doctor_id=doctor_id,
+                                    date=visit_date,
+                                    tooth_number=tooth_number,
+                                    diagnosis_notes=diagnosis_notes,
+                                    treatment_notes=treatment_notes,
+                                    price=price,
+                                    paid=True,
+                                )
+                                db.add(visit)
+                                visit_count += 1
+
+                            file_result["visits_created"] = visit_count
+                            file_result["visits_skipped"] = skipped_count
+
+                    # FIX: commit per file so one failure doesn't roll back others
+                    db.commit()
+
+                except Exception as e:
+                    db.rollback()  # FIX: rollback only this file on error
+                    file_errors.append(f"{filename}: {str(e)}")
+
+                # Accumulate into summary
+                for key in file_result:
+                    summary[key] += file_result[key]
+                summary["errors"].extend(file_errors)
+                summary["files_processed"] += 1
+
+                yield _sse({
+                    "type": "file_done",
+                    "current": i + 1,
+                    "total": total,
+                    "file": filename,
+                    **file_result,
+                    "errors": file_errors,
+                })
+
+            yield _sse({"type": "complete", "summary": summary})
 
         except Exception as e:
-            db.rollback()  # FIX: rollback only this file on error
-            results["errors"].append(f"{filename}: {str(e)}")
-            continue
+            summary["errors"].append(f"Fatal error: {str(e)}")
+            yield _sse({"type": "complete", "summary": summary})
 
-    return results
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
