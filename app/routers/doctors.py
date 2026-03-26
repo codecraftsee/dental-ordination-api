@@ -1,5 +1,7 @@
+import logging
 from typing import Annotated, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -7,6 +9,8 @@ from app.models.doctor import Doctor, Specialization
 from app.models.visit import Visit
 from app.schemas.doctor import DoctorCreate, DoctorUpdate, DoctorResponse
 from app.dependencies import require_admin, require_staff
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/doctors", tags=["doctors"])
 
@@ -97,9 +101,10 @@ def delete_doctor(
     try:
         db.delete(doctor)
         db.commit()
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.rollback()
+        logger.exception("Failed to delete doctor %s", doctor_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+            detail="Internal server error deleting doctor"
+        ) from e
