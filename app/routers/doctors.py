@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.models.doctor import Doctor, Specialization
+from app.models.visit import Visit
 from app.schemas.doctor import DoctorCreate, DoctorUpdate, DoctorResponse
 from app.dependencies import require_admin, require_staff
 
@@ -87,5 +88,18 @@ def delete_doctor(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Doctor not found"
         )
-    db.delete(doctor)
-    db.commit()
+    visit_count = db.query(Visit).filter(Visit.doctor_id == doctor_id).count()
+    if visit_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete doctor with existing visits. Delete the visits first."
+        )
+    try:
+        db.delete(doctor)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
