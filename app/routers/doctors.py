@@ -1,11 +1,16 @@
+import logging
 from typing import Annotated, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.models.doctor import Doctor, Specialization
+from app.models.visit import Visit
 from app.schemas.doctor import DoctorCreate, DoctorUpdate, DoctorResponse
 from app.dependencies import require_admin, require_staff
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/doctors", tags=["doctors"])
 
@@ -87,5 +92,19 @@ def delete_doctor(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Doctor not found"
         )
-    db.delete(doctor)
-    db.commit()
+    visit_count = db.query(Visit).filter(Visit.doctor_id == doctor_id).count()
+    if visit_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete doctor with existing visits. Delete the visits first."
+        )
+    try:
+        db.delete(doctor)
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("Failed to delete doctor %s", doctor_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error deleting doctor"
+        ) from e
