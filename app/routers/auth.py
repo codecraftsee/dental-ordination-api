@@ -4,9 +4,9 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
-from app.schemas.auth import TokenResponse, RefreshRequest
+from app.schemas.auth import TokenResponse, RefreshRequest, ChangePasswordRequest
 from app.schemas.user import UserResponse
-from app.services.auth import verify_password, create_access_token, create_refresh_token, decode_token
+from app.services.auth import verify_password, get_password_hash, create_access_token, create_refresh_token, decode_token
 from app.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -67,6 +67,36 @@ def refresh_token(
         access_token=access_token,
         refresh_token=new_refresh_token
     )
+
+
+@router.put("/change-password")
+def change_password(
+    request: ChangePasswordRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)]
+):
+    if request.new_password != request.confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password and confirm password do not match"
+        )
+
+    if not verify_password(request.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+
+    if verify_password(request.new_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from current password"
+        )
+
+    current_user.password_hash = get_password_hash(request.new_password)
+    db.commit()
+
+    return {"message": "Password changed successfully"}
 
 
 @router.get("/me", response_model=UserResponse)
