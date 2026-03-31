@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from app.database import SessionLocal
 from app.dependencies import require_admin
 from app.models.user import User
-from app.models.patient import Patient, Gender
+from app.models.patient import Patient, Gender, ImportStatus
 from app.models.doctor import Doctor
 from app.models.visit import Visit
 
@@ -130,6 +130,8 @@ async def import_xlsx_files(
             "patients_found": 0,
             "visits_created": 0,
             "visits_skipped": 0,
+            "patients_with_warnings": 0,
+            "visits_with_warnings": 0,
             "files_processed": 0,
             "errors": [],
         }
@@ -171,6 +173,8 @@ async def import_xlsx_files(
                     "patients_found": 0,
                     "visits_created": 0,
                     "visits_skipped": 0,
+                    "patients_with_warnings": 0,
+                    "visits_with_warnings": 0,
                 }
                 committed = False
 
@@ -202,8 +206,13 @@ async def import_xlsx_files(
                         if not first_name or not last_name:
                             file_errors.append(f"{filename}: Missing patient name")
                         else:
+                            patient_warnings: list[str] = []
+
                             gender = parse_gender(gender_raw)
                             if not gender:
+                                patient_warnings.append(
+                                    f"Invalid gender '{gender_raw}', defaulted to MALE"
+                                )
                                 file_errors.append(
                                     f"{filename}: Invalid gender '{gender_raw}', defaulting to male"
                                 )
@@ -219,10 +228,19 @@ async def import_xlsx_files(
                                 date_of_birth = parse_date(str(dob_raw) if dob_raw else None)
 
                             if not date_of_birth:
+                                patient_warnings.append(
+                                    f"Invalid DOB '{dob_raw}', defaulted to 1900-01-01"
+                                )
                                 file_errors.append(
                                     f"{filename}: Invalid DOB '{dob_raw}', using 1900-01-01"
                                 )
                                 date_of_birth = date(1900, 1, 1)
+
+                            patient_import_status = (
+                                ImportStatus.IMPORTED_WITH_WARNINGS if patient_warnings
+                                else ImportStatus.IMPORTED_OK
+                            )
+                            patient_warnings_str = "\n".join(patient_warnings) or None
 
                             # --- Find or create patient ---
                             patient = db.query(Patient).filter(
@@ -244,10 +262,14 @@ async def import_xlsx_files(
                                     city=city,
                                     phone=phone,
                                     email=email,
+                                    import_status=patient_import_status,
+                                    import_warnings=patient_warnings_str,
                                 )
                                 db.add(patient)
                                 db.flush()  # get patient.id before visit inserts
                                 file_result["patients_created"] += 1
+                                if patient_import_status == ImportStatus.IMPORTED_WITH_WARNINGS:
+                                    file_result["patients_with_warnings"] += 1
 
                             # --- Parse visit rows (row 14+) ---
                             visit_count = 0
@@ -313,6 +335,15 @@ async def import_xlsx_files(
                                     skipped_count += 1
                                     continue
 
+                                visit_warnings: list[str] = []
+                                if price is None:
+                                    visit_warnings.append("No price found in row")
+
+                                visit_import_status = (
+                                    ImportStatus.IMPORTED_WITH_WARNINGS if visit_warnings
+                                    else ImportStatus.IMPORTED_OK
+                                )
+
                                 visit = Visit(
                                     patient_id=patient.id,
                                     doctor_id=doctor_id,
@@ -322,9 +353,13 @@ async def import_xlsx_files(
                                     treatment_notes=treatment_notes,
                                     price=price,
                                     paid=True,
+                                    import_status=visit_import_status,
+                                    import_warnings="\n".join(visit_warnings) or None,
                                 )
                                 db.add(visit)
                                 visit_count += 1
+                                if visit_import_status == ImportStatus.IMPORTED_WITH_WARNINGS:
+                                    file_result["visits_with_warnings"] += 1
 
                             file_result["visits_created"] = visit_count
                             file_result["visits_skipped"] = skipped_count
@@ -341,6 +376,8 @@ async def import_xlsx_files(
                         "patients_found": 0,
                         "visits_created": 0,
                         "visits_skipped": 0,
+                        "patients_with_warnings": 0,
+                        "visits_with_warnings": 0,
                     }
                 finally:
                     db.close()

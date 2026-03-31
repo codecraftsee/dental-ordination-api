@@ -2,7 +2,7 @@ from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr
-from app.models.patient import Gender
+from app.models.patient import Gender, ImportStatus
 
 
 class PatientBase(BaseModel):
@@ -45,6 +45,8 @@ class PatientResponse(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     user_id: Optional[UUID] = None
+    import_status: ImportStatus
+    import_warnings: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

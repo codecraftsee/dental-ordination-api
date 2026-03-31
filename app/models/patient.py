@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
-from sqlalchemy import Column, String, Date, DateTime, Enum, ForeignKey
+from sqlalchemy import Column, String, Date, DateTime, Enum, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -9,6 +9,12 @@ from app.database import Base
 class Gender(str, PyEnum):
     MALE = "male"
     FEMALE = "female"
+
+
+class ImportStatus(str, PyEnum):
+    MANUAL = "manual"
+    IMPORTED_OK = "imported_ok"
+    IMPORTED_WITH_WARNINGS = "imported_with_warnings"
 
 
 class Patient(Base):
@@ -25,6 +31,8 @@ class Patient(Base):
     city = Column(String(100), nullable=True)
     phone = Column(String(50), nullable=True)
     email = Column(String(255), nullable=True)
+    import_status = Column(Enum(ImportStatus), nullable=False, default=ImportStatus.MANUAL)
+    import_warnings = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

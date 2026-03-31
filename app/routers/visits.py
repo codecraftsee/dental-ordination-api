@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, UserRole
 from app.models.visit import Visit
-from app.models.patient import Patient
+from app.models.patient import Patient, ImportStatus
 from app.schemas.visit import VisitCreate, VisitUpdate, VisitResponse
 from app.dependencies import get_current_user, require_admin, require_admin_or_doctor, require_staff
 
@@ -19,7 +19,8 @@ def list_visits(
     patient_id: Optional[str] = Query(None),
     doctor_id: Optional[str] = Query(None),
     date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None)
+    date_to: Optional[date] = Query(None),
+    import_status: Optional[ImportStatus] = Query(None),
 ):
     query = db.query(Visit)
 
@@ -41,6 +42,9 @@ def list_visits(
 
     if date_to:
         query = query.filter(Visit.date <= date_to)
+
+    if import_status:
+        query = query.filter(Visit.import_status == import_status)
 
     return query.order_by(Visit.date.desc()).all()
 

@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Date, DateTime, Integer, Numeric, Boolean, ForeignKey
+from sqlalchemy import Column, String, Text, Date, DateTime, Integer, Numeric, Boolean, ForeignKey, Enum
 from sqlalchemy.orm import relationship
 from app.database import Base
+from app.models.patient import ImportStatus
 
 
 class Visit(Base):
@@ -19,6 +20,8 @@ class Visit(Base):
     treatment_notes = Column(Text, nullable=True)
     price = Column(Numeric(10, 2), nullable=True)
     paid = Column(Boolean, default=True, nullable=False)
+    import_status = Column(Enum(ImportStatus), nullable=False, default=ImportStatus.MANUAL)
+    import_warnings = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

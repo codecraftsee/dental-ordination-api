@@ -75,6 +75,22 @@ def on_startup():
                     sqlalchemy.text("ALTER TABLE visits ADD COLUMN paid BOOLEAN NOT NULL DEFAULT FALSE")
                 )
 
+    # Add import_status / import_warnings columns to patients and visits
+    for table_name in ("patients", "visits"):
+        if table_name in insp.get_table_names():
+            columns = [c["name"] for c in insp.get_columns(table_name)]
+            if "import_status" not in columns:
+                with engine.begin() as conn:
+                    conn.execute(sqlalchemy.text(
+                        f"ALTER TABLE {table_name} "
+                        f"ADD COLUMN import_status VARCHAR(30) NOT NULL DEFAULT 'manual'"
+                    ))
+            if "import_warnings" not in columns:
+                with engine.begin() as conn:
+                    conn.execute(sqlalchemy.text(
+                        f"ALTER TABLE {table_name} ADD COLUMN import_warnings TEXT"
+                    ))
+
     # Create default admin user if not exists
     with Session(engine) as db:
         admin = db.query(User).filter(User.email == "admin@dentalclinic.com").first()

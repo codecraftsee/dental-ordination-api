@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel
+from app.models.patient import ImportStatus
 
 
 class VisitBase(BaseModel):
@@ -37,6 +38,8 @@ class VisitUpdate(BaseModel):
 
 class VisitResponse(VisitBase):
     id: UUID
+    import_status: ImportStatus
+    import_warnings: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

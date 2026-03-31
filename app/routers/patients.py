@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, UserRole
-from app.models.patient import Patient
+from app.models.patient import Patient, ImportStatus
 from app.schemas.patient import PatientCreate, PatientUpdate, PatientResponse
 from app.dependencies import get_current_user, require_admin, require_admin_or_doctor, require_staff
 
@@ -15,7 +15,8 @@ def list_patients(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_staff)],
     search: Optional[str] = Query(None),
-    city: Optional[str] = Query(None)
+    city: Optional[str] = Query(None),
+    import_status: Optional[ImportStatus] = Query(None),
 ):
     query = db.query(Patient)
 
@@ -29,6 +30,9 @@ def list_patients(
 
     if city:
         query = query.filter(Patient.city == city)
+
+    if import_status:
+        query = query.filter(Patient.import_status == import_status)
 
     return query.all()
 
