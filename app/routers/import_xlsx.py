@@ -130,6 +130,8 @@ async def import_xlsx_files(
             "patients_found": 0,
             "visits_created": 0,
             "visits_skipped": 0,
+            "patients_incomplete": 0,
+            "visits_incomplete": 0,
             "files_processed": 0,
             "errors": [],
         }
@@ -171,6 +173,8 @@ async def import_xlsx_files(
                     "patients_found": 0,
                     "visits_created": 0,
                     "visits_skipped": 0,
+                    "patients_incomplete": 0,
+                    "visits_incomplete": 0,
                 }
                 committed = False
 
@@ -202,8 +206,11 @@ async def import_xlsx_files(
                         if not first_name or not last_name:
                             file_errors.append(f"{filename}: Missing patient name")
                         else:
+                            patient_incomplete = False
+
                             gender = parse_gender(gender_raw)
                             if not gender:
+                                patient_incomplete = True
                                 file_errors.append(
                                     f"{filename}: Invalid gender '{gender_raw}', defaulting to male"
                                 )
@@ -219,6 +226,7 @@ async def import_xlsx_files(
                                 date_of_birth = parse_date(str(dob_raw) if dob_raw else None)
 
                             if not date_of_birth:
+                                patient_incomplete = True
                                 file_errors.append(
                                     f"{filename}: Invalid DOB '{dob_raw}', using 1900-01-01"
                                 )
@@ -244,10 +252,13 @@ async def import_xlsx_files(
                                     city=city,
                                     phone=phone,
                                     email=email,
+                                    import_incomplete=patient_incomplete,
                                 )
                                 db.add(patient)
                                 db.flush()  # get patient.id before visit inserts
                                 file_result["patients_created"] += 1
+                                if patient_incomplete:
+                                    file_result["patients_incomplete"] += 1
 
                             # --- Parse visit rows (row 14+) ---
                             visit_count = 0
@@ -313,6 +324,8 @@ async def import_xlsx_files(
                                     skipped_count += 1
                                     continue
 
+                                visit_incomplete = price is None
+
                                 visit = Visit(
                                     patient_id=patient.id,
                                     doctor_id=doctor_id,
@@ -322,9 +335,12 @@ async def import_xlsx_files(
                                     treatment_notes=treatment_notes,
                                     price=price,
                                     paid=True,
+                                    import_incomplete=visit_incomplete,
                                 )
                                 db.add(visit)
                                 visit_count += 1
+                                if visit_incomplete:
+                                    file_result["visits_incomplete"] += 1
 
                             file_result["visits_created"] = visit_count
                             file_result["visits_skipped"] = skipped_count
@@ -341,6 +357,8 @@ async def import_xlsx_files(
                         "patients_found": 0,
                         "visits_created": 0,
                         "visits_skipped": 0,
+                        "patients_incomplete": 0,
+                        "visits_incomplete": 0,
                     }
                 finally:
                     db.close()

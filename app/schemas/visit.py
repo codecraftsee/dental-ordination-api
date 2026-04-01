@@ -37,6 +37,7 @@ class VisitUpdate(BaseModel):
 
 class VisitResponse(VisitBase):
     id: UUID
+    import_incomplete: bool
     created_at: datetime
     updated_at: datetime
 

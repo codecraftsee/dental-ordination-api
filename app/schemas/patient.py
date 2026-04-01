@@ -45,6 +45,7 @@ class PatientResponse(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     user_id: Optional[UUID] = None
+    import_incomplete: bool
     created_at: datetime
     updated_at: datetime
 

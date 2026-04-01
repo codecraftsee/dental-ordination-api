@@ -19,6 +19,7 @@ class Visit(Base):
     treatment_notes = Column(Text, nullable=True)
     price = Column(Numeric(10, 2), nullable=True)
     paid = Column(Boolean, default=True, nullable=False)
+    import_incomplete = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
