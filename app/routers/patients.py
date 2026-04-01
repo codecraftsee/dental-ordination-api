@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, UserRole
-from app.models.patient import Patient, ImportStatus
+from app.models.patient import Patient
 from app.schemas.patient import PatientCreate, PatientUpdate, PatientResponse
 from app.dependencies import get_current_user, require_admin, require_admin_or_doctor, require_staff
 
@@ -16,7 +16,7 @@ def list_patients(
     current_user: Annotated[User, Depends(require_staff)],
     search: Optional[str] = Query(None),
     city: Optional[str] = Query(None),
-    import_status: Optional[ImportStatus] = Query(None),
+    import_incomplete: Optional[bool] = Query(None),
 ):
     query = db.query(Patient)
 
@@ -31,8 +31,8 @@ def list_patients(
     if city:
         query = query.filter(Patient.city == city)
 
-    if import_status:
-        query = query.filter(Patient.import_status == import_status)
+    if import_incomplete is not None:
+        query = query.filter(Patient.import_incomplete == import_incomplete)
 
     return query.all()
 
@@ -92,6 +92,24 @@ def update_patient(
     for key, value in update_data.items():
         setattr(patient, key, value)
 
+    db.commit()
+    db.refresh(patient)
+    return patient
+
+
+@router.patch("/{patient_id}/dismiss-warning", response_model=PatientResponse)
+def dismiss_import_warning(
+    patient_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin_or_doctor)]
+):
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Patient not found"
+        )
+    patient.import_incomplete = False
     db.commit()
     db.refresh(patient)
     return patient

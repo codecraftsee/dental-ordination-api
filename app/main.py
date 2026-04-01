@@ -75,20 +75,25 @@ def on_startup():
                     sqlalchemy.text("ALTER TABLE visits ADD COLUMN paid BOOLEAN NOT NULL DEFAULT FALSE")
                 )
 
-    # Add import_status / import_warnings columns to patients and visits
+    # Add import_incomplete column and drop old import_status/import_warnings columns
     for table_name in ("patients", "visits"):
         if table_name in insp.get_table_names():
             columns = [c["name"] for c in insp.get_columns(table_name)]
-            if "import_status" not in columns:
+            if "import_incomplete" not in columns:
                 with engine.begin() as conn:
                     conn.execute(sqlalchemy.text(
                         f"ALTER TABLE {table_name} "
-                        f"ADD COLUMN import_status VARCHAR(30) NOT NULL DEFAULT 'manual'"
+                        f"ADD COLUMN import_incomplete BOOLEAN NOT NULL DEFAULT FALSE"
                     ))
-            if "import_warnings" not in columns:
+            if "import_status" in columns:
                 with engine.begin() as conn:
                     conn.execute(sqlalchemy.text(
-                        f"ALTER TABLE {table_name} ADD COLUMN import_warnings TEXT"
+                        f"ALTER TABLE {table_name} DROP COLUMN import_status"
+                    ))
+            if "import_warnings" in columns:
+                with engine.begin() as conn:
+                    conn.execute(sqlalchemy.text(
+                        f"ALTER TABLE {table_name} DROP COLUMN import_warnings"
                     ))
 
     # Create default admin user if not exists

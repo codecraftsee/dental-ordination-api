@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, UserRole
 from app.models.visit import Visit
-from app.models.patient import Patient, ImportStatus
+from app.models.patient import Patient
 from app.schemas.visit import VisitCreate, VisitUpdate, VisitResponse
 from app.dependencies import get_current_user, require_admin, require_admin_or_doctor, require_staff
 
@@ -20,7 +20,7 @@ def list_visits(
     doctor_id: Optional[str] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
-    import_status: Optional[ImportStatus] = Query(None),
+    import_incomplete: Optional[bool] = Query(None),
 ):
     query = db.query(Visit)
 
@@ -43,8 +43,8 @@ def list_visits(
     if date_to:
         query = query.filter(Visit.date <= date_to)
 
-    if import_status:
-        query = query.filter(Visit.import_status == import_status)
+    if import_incomplete is not None:
+        query = query.filter(Visit.import_incomplete == import_incomplete)
 
     return query.order_by(Visit.date.desc()).all()
 
@@ -105,6 +105,24 @@ def update_visit(
     for key, value in update_data.items():
         setattr(visit, key, value)
 
+    db.commit()
+    db.refresh(visit)
+    return visit
+
+
+@router.patch("/{visit_id}/dismiss-warning", response_model=VisitResponse)
+def dismiss_import_warning(
+    visit_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    _: Annotated[User, Depends(require_admin_or_doctor)]
+):
+    visit = db.query(Visit).filter(Visit.id == visit_id).first()
+    if not visit:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Visit not found"
+        )
+    visit.import_incomplete = False
     db.commit()
     db.refresh(visit)
     return visit
