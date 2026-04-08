@@ -153,7 +153,7 @@ async def import_xlsx_files(
                     else:
                         # Duplicate initial — mark ambiguous so it surfaces an error
                         doctor_map[initial] = None
-                default_doctor_id = None
+                default_doctor_id = doctors[0].id if len(doctors) == 1 else None
             finally:
                 db.close()
 
