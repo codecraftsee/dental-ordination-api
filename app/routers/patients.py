@@ -2,10 +2,10 @@ from typing import Annotated, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.models.patient import Patient
 from app.schemas.patient import PatientCreate, PatientUpdate, PatientResponse
-from app.dependencies import get_current_user, require_admin, require_admin_or_doctor, require_staff
+from app.dependencies import require_admin, require_admin_or_doctor, require_staff
 
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/patients", tags=["patients"])
 @router.get("", response_model=List[PatientResponse])
 def list_patients(
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_staff)],
+    _: Annotated[User, Depends(require_staff)],
     search: Optional[str] = Query(None),
     city: Optional[str] = Query(None),
     import_incomplete: Optional[bool] = Query(None),
@@ -54,7 +54,7 @@ def create_patient(
 def get_patient(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)]
+    _: Annotated[User, Depends(require_staff)]
 ):
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
@@ -62,15 +62,6 @@ def get_patient(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Patient not found"
         )
-
-    # Patient role can only view their own profile
-    if current_user.role == UserRole.PATIENT:
-        if patient.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
-
     return patient
 
 

@@ -6,7 +6,6 @@ from app.dependencies import require_admin
 from app.models.user import User
 from app.models.visit import Visit
 from app.models.patient import Patient
-from app.models.doctor import Doctor
 from app.models.diagnosis import Diagnosis
 from app.models.treatment import Treatment
 
@@ -30,16 +29,6 @@ def delete_all_patients(
 ):
     db.query(Visit).delete(synchronize_session=False)
     count = db.query(Patient).delete(synchronize_session=False)
-    db.commit()
-    return {"deleted": count}
-
-
-@router.delete("/doctors")
-def delete_all_doctors(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
-):
-    count = db.query(Doctor).delete(synchronize_session=False)
     db.commit()
     return {"deleted": count}
 
@@ -72,7 +61,6 @@ def delete_all_data(
     try:
         visits = db.query(Visit).delete(synchronize_session=False)
         patients = db.query(Patient).delete(synchronize_session=False)
-        doctors = db.query(Doctor).delete(synchronize_session=False)
         diagnoses = db.query(Diagnosis).delete(synchronize_session=False)
         treatments = db.query(Treatment).delete(synchronize_session=False)
         db.commit()
@@ -82,7 +70,6 @@ def delete_all_data(
     return {
         "visits": visits,
         "patients": patients,
-        "doctors": doctors,
         "diagnoses": diagnoses,
         "treatments": treatments,
     }

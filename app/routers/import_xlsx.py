@@ -12,9 +12,8 @@ from openpyxl import load_workbook
 
 from app.database import SessionLocal
 from app.dependencies import require_admin
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.patient import Patient, Gender
-from app.models.doctor import Doctor
 from app.models.visit import Visit
 
 router = APIRouter(prefix="/api/import", tags=["import"])
@@ -142,10 +141,15 @@ async def import_xlsx_files(
             # Pre-load doctors for initial matching using a short-lived session
             db = SessionLocal()
             try:
-                doctors = db.query(Doctor).all()
-                doctor_map: dict[str, str | None] = {}  # initial letter -> doctor id
+                doctors = (
+                    db.query(User)
+                    .filter(User.role == UserRole.DOCTOR)
+                    .all()
+                )
+                doctor_map: dict[str, str | None] = {}  # initial letter -> user id
                 for doc in doctors:
-                    initial = doc.first_name[0].upper() if doc.first_name else ""
+                    first_name = doc.first_name or ""
+                    initial = first_name[0].upper() if first_name else ""
                     if not initial:
                         continue
                     if initial not in doctor_map:

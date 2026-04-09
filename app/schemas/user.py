@@ -2,18 +2,17 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr
-from app.models.user import UserRole
+from app.models.user import UserRole, Specialization
 
 
-class UserBase(BaseModel):
+class UserCreate(BaseModel):
     email: EmailStr
     first_name: str
     last_name: str
-    role: UserRole = UserRole.PATIENT
-
-
-class UserCreate(UserBase):
-    password: str
+    role: UserRole = UserRole.NURSE
+    phone: Optional[str] = None
+    specialization: Optional[Specialization] = None
+    license_number: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
@@ -21,13 +20,23 @@ class UserUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     role: Optional[UserRole] = None
+    phone: Optional[str] = None
     is_active: Optional[bool] = None
-    password: Optional[str] = None
+    specialization: Optional[Specialization] = None
+    license_number: Optional[str] = None
 
 
-class UserResponse(UserBase):
+class UserResponse(BaseModel):
     id: UUID
+    email: str
+    role: UserRole
     is_active: bool
+    must_set_password: bool
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    specialization: Optional[Specialization] = None
+    license_number: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

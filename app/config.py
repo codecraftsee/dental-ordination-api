@@ -9,6 +9,16 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
+    # Email / SMTP
+    smtp_host: str = "sandbox.smtp.mailtrap.io"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "noreply@dentalclinic.com"
+
+    # Frontend base URL used to build invite links
+    frontend_url: str = "http://localhost:4200"
+
     class Config:
         env_file = ".env"
         case_sensitive = False

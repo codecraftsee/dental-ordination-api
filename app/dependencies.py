@@ -54,4 +54,4 @@ def require_roles(*roles: UserRole):
 # Common role dependencies
 require_admin = require_roles(UserRole.ADMIN)
 require_admin_or_doctor = require_roles(UserRole.ADMIN, UserRole.DOCTOR)
-require_staff = require_roles(UserRole.ADMIN, UserRole.DOCTOR, UserRole.ASSISTANT)
+require_staff = require_roles(UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE)

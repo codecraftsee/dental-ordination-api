@@ -10,7 +10,7 @@ class Visit(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     patient_id = Column(String(36), ForeignKey("patients.id"), nullable=False)
-    doctor_id = Column(String(36), ForeignKey("doctors.id"), nullable=False)
+    doctor_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     date = Column(Date, nullable=False)
     tooth_number = Column(Integer, nullable=True)
     diagnosis_id = Column(String(36), ForeignKey("diagnoses.id"), nullable=True)
@@ -24,6 +24,6 @@ class Visit(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     patient = relationship("Patient", back_populates="visits")
-    doctor = relationship("Doctor", back_populates="visits")
+    doctor = relationship("User", backref="visits")
     diagnosis = relationship("Diagnosis")
     treatment = relationship("Treatment")

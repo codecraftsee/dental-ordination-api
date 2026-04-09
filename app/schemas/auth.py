@@ -20,3 +20,9 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
     confirm_password: str
+
+
+class SetPasswordRequest(BaseModel):
+    token: str
+    password: str = Field(..., min_length=8)
+    password_confirm: str
