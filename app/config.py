@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
+    # CORS
+    allowed_origins: str = "http://localhost:4200,https://codecraftsee.github.io"
+
     # Email / SMTP
     smtp_host: str = "sandbox.smtp.mailtrap.io"
     smtp_port: int = 587
