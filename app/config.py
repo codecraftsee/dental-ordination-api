@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
 
     # CORS
-    allowed_origins: str = "http://localhost:4200,https://codecraftsee.github.io"
+    allowed_origins: str = "http://localhost:4200,https://codecraftsee.github.io,https://dental-ordination-api-production.up.railway.app"
 
     # Email / SMTP
     smtp_host: str = "sandbox.smtp.mailtrap.io"
