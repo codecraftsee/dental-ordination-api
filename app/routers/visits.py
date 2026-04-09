@@ -3,11 +3,10 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.models.visit import Visit
-from app.models.patient import Patient
 from app.schemas.visit import VisitCreate, VisitUpdate, VisitResponse
-from app.dependencies import get_current_user, require_admin, require_admin_or_doctor, require_staff
+from app.dependencies import require_admin, require_admin_or_doctor, require_staff
 
 router = APIRouter(prefix="/api/visits", tags=["visits"])
 
@@ -15,7 +14,7 @@ router = APIRouter(prefix="/api/visits", tags=["visits"])
 @router.get("", response_model=List[VisitResponse])
 def list_visits(
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)],
+    _: Annotated[User, Depends(require_staff)],
     patient_id: Optional[str] = Query(None),
     doctor_id: Optional[str] = Query(None),
     date_from: Optional[date] = Query(None),
@@ -24,15 +23,8 @@ def list_visits(
 ):
     query = db.query(Visit)
 
-    # Patient role can only view their own visits
-    if current_user.role == UserRole.PATIENT:
-        patient = db.query(Patient).filter(Patient.user_id == current_user.id).first()
-        if not patient:
-            return []
-        query = query.filter(Visit.patient_id == patient.id)
-    else:
-        if patient_id:
-            query = query.filter(Visit.patient_id == patient_id)
+    if patient_id:
+        query = query.filter(Visit.patient_id == patient_id)
 
     if doctor_id:
         query = query.filter(Visit.doctor_id == doctor_id)
@@ -66,7 +58,7 @@ def create_visit(
 def get_visit(
     visit_id: str,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_user)]
+    _: Annotated[User, Depends(require_staff)]
 ):
     visit = db.query(Visit).filter(Visit.id == visit_id).first()
     if not visit:
@@ -74,16 +66,6 @@ def get_visit(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Visit not found"
         )
-
-    # Patient role can only view their own visits
-    if current_user.role == UserRole.PATIENT:
-        patient = db.query(Patient).filter(Patient.user_id == current_user.id).first()
-        if not patient or visit.patient_id != patient.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
-
     return visit
 
 

@@ -8,8 +8,17 @@ from app.database import Base
 class UserRole(str, PyEnum):
     ADMIN = "admin"
     DOCTOR = "doctor"
-    ASSISTANT = "assistant"
-    PATIENT = "patient"
+    NURSE = "nurse"
+
+
+class Specialization(str, PyEnum):
+    GENERAL_DENTISTRY = "GeneralDentistry"
+    ORTHODONTICS = "Orthodontics"
+    ENDODONTICS = "Endodontics"
+    PERIODONTICS = "Periodontics"
+    ORAL_SURGERY = "OralSurgery"
+    PEDIATRIC_DENTISTRY = "PediatricDentistry"
+    PROSTHODONTICS = "Prosthodontics"
 
 
 class User(Base):
@@ -17,10 +26,14 @@ class User(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    first_name = Column(String(100), nullable=False)
-    last_name = Column(String(100), nullable=False)
-    role = Column(Enum(UserRole), nullable=False, default=UserRole.PATIENT)
+    password_hash = Column(String(255), nullable=True)
+    role = Column(Enum(UserRole), nullable=False, default=UserRole.NURSE)
     is_active = Column(Boolean, default=True)
+    must_set_password = Column(Boolean, default=False)
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    phone = Column(String(50), nullable=True)
+    specialization = Column(String(50), nullable=True)
+    license_number = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

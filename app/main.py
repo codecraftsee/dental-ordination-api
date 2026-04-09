@@ -4,7 +4,7 @@ import traceback
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import auth, users, patients, doctors, diagnoses, treatments, visits, import_xlsx, admin
+from app.routers import auth, users, patients, diagnoses, treatments, visits, import_xlsx, admin
 from app.database import engine, Base
 from app.models import User
 from app.models.diagnosis import Diagnosis, DiagnosisCategory
@@ -52,7 +52,6 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(patients.router)
-app.include_router(doctors.router)
 app.include_router(diagnoses.router)
 app.include_router(treatments.router)
 app.include_router(visits.router)
@@ -62,20 +61,65 @@ app.include_router(admin.router)
 
 @app.on_event("startup")
 def on_startup():
-    # Create tables
     Base.metadata.create_all(bind=engine)
 
-    # Add 'paid' column to visits if it doesn't exist (no Alembic)
     insp = inspect(engine)
+
+    # Users table migrations
+    if "users" in insp.get_table_names():
+        columns = [c["name"] for c in insp.get_columns("users")]
+
+        if "must_set_password" not in columns:
+            with engine.begin() as conn:
+                conn.execute(sqlalchemy.text(
+                    "ALTER TABLE users ADD COLUMN must_set_password BOOLEAN NOT NULL DEFAULT FALSE"
+                ))
+
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text(
+                "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"
+            ))
+
+        # Add profile columns directly to users (replacing staff_profiles table)
+        for col_def in [
+            ("first_name", "VARCHAR(100)"),
+            ("last_name", "VARCHAR(100)"),
+            ("phone", "VARCHAR(50)"),
+            ("specialization", "VARCHAR(50)"),
+            ("license_number", "VARCHAR(100)"),
+        ]:
+            if col_def[0] not in columns:
+                with engine.begin() as conn:
+                    conn.execute(sqlalchemy.text(
+                        f"ALTER TABLE users ADD COLUMN {col_def[0]} {col_def[1]}"
+                    ))
+
+    # Migrate data from staff_profiles into users, then drop the table
+    if "staff_profiles" in insp.get_table_names():
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("""
+                UPDATE users u
+                SET first_name = sp.first_name,
+                    last_name = sp.last_name,
+                    phone = sp.phone,
+                    specialization = sp.specialization::varchar,
+                    license_number = sp.license_number
+                FROM staff_profiles sp
+                WHERE u.id = sp.user_id
+            """))
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text("DROP TABLE staff_profiles"))
+
+    # Add paid column to visits if it doesn't exist
     if "visits" in insp.get_table_names():
         columns = [c["name"] for c in insp.get_columns("visits")]
         if "paid" not in columns:
             with engine.begin() as conn:
-                conn.execute(
-                    sqlalchemy.text("ALTER TABLE visits ADD COLUMN paid BOOLEAN NOT NULL DEFAULT FALSE")
-                )
+                conn.execute(sqlalchemy.text(
+                    "ALTER TABLE visits ADD COLUMN paid BOOLEAN NOT NULL DEFAULT FALSE"
+                ))
 
-    # Add import_incomplete column and drop old import_status/import_warnings columns
+    # Add import_incomplete column and drop old import columns
     for table_name in ("patients", "visits"):
         if table_name in insp.get_table_names():
             columns = [c["name"] for c in insp.get_columns(table_name)]
@@ -96,18 +140,18 @@ def on_startup():
                         f"ALTER TABLE {table_name} DROP COLUMN import_warnings"
                     ))
 
-    # Create default admin user if not exists
+    # Seed default admin user
     with Session(engine) as db:
-        admin = db.query(User).filter(User.email == "admin@dentalclinic.com").first()
-        if not admin:
-            admin = User(
+        admin_user = db.query(User).filter(User.email == "admin@dentalclinic.com").first()
+        if not admin_user:
+            db.add(User(
                 email="admin@dentalclinic.com",
-                password_hash=get_password_hash("p5zTCyUJ^B#^Juvy^%bj"),
+                password_hash=get_password_hash("Test123#"),
+                role=UserRole.ADMIN,
+                must_set_password=False,
                 first_name="Admin",
                 last_name="User",
-                role=UserRole.ADMIN
-            )
-            db.add(admin)
+            ))
             db.commit()
 
         # Seed diagnoses
