@@ -82,6 +82,8 @@ SECRET_KEY=your-secret-key
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
+ALLOWED_ORIGINS=http://localhost:4200,https://codecraftsee.github.io
+FRONTEND_URL=http://localhost:4200
 ```
 
 ## Known Issues & Fixes
@@ -89,12 +91,14 @@ REFRESH_TOKEN_EXPIRE_DAYS=7
 - **SQLite local / PostgreSQL prod**: `DATABASE_URL` in `.env` controls which is used
 
 ## CORS Allowed Origins
+Driven by `ALLOWED_ORIGINS` env var (comma-separated). Defaults:
 - `http://localhost:4200`
 - `https://codecraftsee.github.io`
-- `https://dental-ordination-api.onrender.com`
+- `https://dental-ordination.vercel.app`
 
-## Production (Render)
-- Web Service: `https://dental-ordination-api.onrender.com`
-- Deploy branch: `develop`
-- Build: `pip install -r requirements.txt`
-- Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+## Production (Railway + Supabase)
+- **API**: Railway (free tier) — auto-deploys from `develop` branch
+- **Database**: Supabase PostgreSQL (free tier) — connection string set via `DATABASE_URL` env var
+- **Frontend**: Vercel (free) — Angular static site
+- **Procfile**: `web: uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- Railway env vars: `DATABASE_URL`, `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `REFRESH_TOKEN_EXPIRE_DAYS`, `ALLOWED_ORIGINS`, `FRONTEND_URL`

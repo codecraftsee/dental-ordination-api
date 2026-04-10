@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.routers import auth, users, patients, diagnoses, treatments, visits, import_xlsx, admin
 from app.database import engine, Base
+from app.config import get_settings
 from app.models import User
 from app.models.diagnosis import Diagnosis, DiagnosisCategory
 from app.models.treatment import Treatment, TreatmentCategory
@@ -35,14 +36,12 @@ async def log_exceptions(request: Request, call_next):
         logger.error(traceback.format_exc())
         return JSONResponse(status_code=500, content={"detail": str(exc)})
 
-# CORS configuration
+# CORS configuration — origins driven by ALLOWED_ORIGINS env var
+settings = get_settings()
+origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:4200",
-        "https://codecraftsee.github.io",
-        "https://dental-ordination-api.onrender.com"
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +63,7 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
 
     insp = inspect(engine)
+    is_postgres = engine.dialect.name == "postgresql"
 
     # Users table migrations
     if "users" in insp.get_table_names():
@@ -75,10 +75,11 @@ def on_startup():
                     "ALTER TABLE users ADD COLUMN must_set_password BOOLEAN NOT NULL DEFAULT FALSE"
                 ))
 
-        with engine.begin() as conn:
-            conn.execute(sqlalchemy.text(
-                "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"
-            ))
+        if is_postgres:
+            with engine.begin() as conn:
+                conn.execute(sqlalchemy.text(
+                    "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"
+                ))
 
         # Add profile columns directly to users (replacing staff_profiles table)
         for col_def in [
@@ -94,8 +95,8 @@ def on_startup():
                         f"ALTER TABLE users ADD COLUMN {col_def[0]} {col_def[1]}"
                     ))
 
-    # Migrate data from staff_profiles into users, then drop the table
-    if "staff_profiles" in insp.get_table_names():
+    # Migrate data from staff_profiles into users, then drop the table (PostgreSQL only)
+    if is_postgres and "staff_profiles" in insp.get_table_names():
         with engine.begin() as conn:
             conn.execute(sqlalchemy.text("""
                 UPDATE users u
@@ -129,12 +130,12 @@ def on_startup():
                         f"ALTER TABLE {table_name} "
                         f"ADD COLUMN import_incomplete BOOLEAN NOT NULL DEFAULT FALSE"
                     ))
-            if "import_status" in columns:
+            if is_postgres and "import_status" in columns:
                 with engine.begin() as conn:
                     conn.execute(sqlalchemy.text(
                         f"ALTER TABLE {table_name} DROP COLUMN import_status"
                     ))
-            if "import_warnings" in columns:
+            if is_postgres and "import_warnings" in columns:
                 with engine.begin() as conn:
                     conn.execute(sqlalchemy.text(
                         f"ALTER TABLE {table_name} DROP COLUMN import_warnings"
