@@ -94,6 +94,7 @@ FRONTEND_URL=http://localhost:4200
 Driven by `ALLOWED_ORIGINS` env var (comma-separated). Defaults:
 - `http://localhost:4200`
 - `https://codecraftsee.github.io`
+- `https://dental-ordination.vercel.app`
 
 ## Production (Railway + Supabase)
 - **API**: Railway (free tier) — auto-deploys from `develop` branch
