@@ -6,9 +6,9 @@ from app.database import Base
 
 
 class UserRole(str, PyEnum):
-    ADMIN = "admin"
-    DOCTOR = "doctor"
-    NURSE = "nurse"
+    ADMIN = "ADMIN"
+    DOCTOR = "DOCTOR"
+    NURSE = "NURSE"
 
 
 class Specialization(str, PyEnum):

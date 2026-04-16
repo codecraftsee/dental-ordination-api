@@ -5,7 +5,8 @@ from app.database import get_db
 from app.models.user import User
 from app.models.treatment import Treatment, TreatmentCategory
 from app.schemas.treatment import TreatmentCreate, TreatmentUpdate, TreatmentResponse
-from app.dependencies import require_admin, require_admin_or_doctor, require_staff
+from app.dependencies import require_permission
+from app.permissions import Permission
 
 router = APIRouter(prefix="/api/treatments", tags=["treatments"])
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/api/treatments", tags=["treatments"])
 @router.get("", response_model=List[TreatmentResponse])
 def list_treatments(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)],
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))],
     category: Optional[TreatmentCategory] = Query(None)
 ):
     query = db.query(Treatment)
@@ -28,7 +29,7 @@ def list_treatments(
 def create_treatment(
     treatment_data: TreatmentCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_CREATE))]
 ):
     existing = db.query(Treatment).filter(Treatment.code == treatment_data.code).first()
     if existing:
@@ -48,7 +49,7 @@ def create_treatment(
 def get_treatment(
     treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))]
 ):
     treatment = db.query(Treatment).filter(Treatment.id == treatment_id).first()
     if not treatment:
@@ -64,7 +65,7 @@ def update_treatment(
     treatment_id: str,
     treatment_data: TreatmentUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_UPDATE))]
 ):
     treatment = db.query(Treatment).filter(Treatment.id == treatment_id).first()
     if not treatment:
@@ -98,7 +99,7 @@ def update_treatment(
 def delete_treatment(
     treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin)]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_DELETE))]
 ):
     treatment = db.query(Treatment).filter(Treatment.id == treatment_id).first()
     if not treatment:

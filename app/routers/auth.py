@@ -12,7 +12,7 @@ from app.services.auth import (
     verify_invite_token,
 )
 from app.dependencies import get_current_user
-from app.utils import profile_fields
+from app.permissions import get_permissions_for_role
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -24,9 +24,14 @@ def _me_response(user: User) -> UserResponse:
         role=user.role,
         is_active=user.is_active,
         must_set_password=user.must_set_password,
+        permissions=get_permissions_for_role(user.role),
+        first_name=user.first_name,
+        last_name=user.last_name,
+        phone=user.phone,
+        specialization=user.specialization,
+        license_number=user.license_number,
         created_at=user.created_at,
         updated_at=user.updated_at,
-        **profile_fields(user),
     )
 
 
@@ -47,7 +52,7 @@ def login(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled")
 
-    access_token = create_access_token(data={"sub": str(user.id), "role": user.role.value})
+    access_token = create_access_token(data={"sub": str(user.id), "role": user.role.value, "permissions": get_permissions_for_role(user.role)})
     refresh_token = create_refresh_token(data={"sub": str(user.id)})
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
@@ -74,7 +79,7 @@ def set_password(
     user.must_set_password = False
     db.commit()
 
-    access_token = create_access_token(data={"sub": str(user.id), "role": user.role.value})
+    access_token = create_access_token(data={"sub": str(user.id), "role": user.role.value, "permissions": get_permissions_for_role(user.role)})
     refresh_token = create_refresh_token(data={"sub": str(user.id)})
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
@@ -93,7 +98,7 @@ def refresh_token(
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
-    access_token = create_access_token(data={"sub": str(user.id), "role": user.role.value})
+    access_token = create_access_token(data={"sub": str(user.id), "role": user.role.value, "permissions": get_permissions_for_role(user.role)})
     new_refresh_token = create_refresh_token(data={"sub": str(user.id)})
     return TokenResponse(access_token=access_token, refresh_token=new_refresh_token)
 
