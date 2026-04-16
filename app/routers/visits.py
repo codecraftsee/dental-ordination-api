@@ -6,7 +6,8 @@ from app.database import get_db
 from app.models.user import User
 from app.models.visit import Visit
 from app.schemas.visit import VisitCreate, VisitUpdate, VisitResponse
-from app.dependencies import require_admin, require_admin_or_doctor, require_staff
+from app.dependencies import require_permission
+from app.permissions import Permission
 
 router = APIRouter(prefix="/api/visits", tags=["visits"])
 
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/api/visits", tags=["visits"])
 @router.get("", response_model=List[VisitResponse])
 def list_visits(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)],
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_READ))],
     patient_id: Optional[str] = Query(None),
     doctor_id: Optional[str] = Query(None),
     date_from: Optional[date] = Query(None),
@@ -45,7 +46,7 @@ def list_visits(
 def create_visit(
     visit_data: VisitCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_CREATE))]
 ):
     visit = Visit(**visit_data.model_dump())
     db.add(visit)
@@ -58,7 +59,7 @@ def create_visit(
 def get_visit(
     visit_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_READ))]
 ):
     visit = db.query(Visit).filter(Visit.id == visit_id).first()
     if not visit:
@@ -74,7 +75,7 @@ def update_visit(
     visit_id: str,
     visit_data: VisitUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))]
 ):
     visit = db.query(Visit).filter(Visit.id == visit_id).first()
     if not visit:
@@ -96,7 +97,7 @@ def update_visit(
 def dismiss_import_warning(
     visit_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))]
 ):
     visit = db.query(Visit).filter(Visit.id == visit_id).first()
     if not visit:
@@ -114,7 +115,7 @@ def dismiss_import_warning(
 def delete_visit(
     visit_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin)]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_DELETE))]
 ):
     visit = db.query(Visit).filter(Visit.id == visit_id).first()
     if not visit:

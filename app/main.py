@@ -141,6 +141,49 @@ def on_startup():
                         f"ALTER TABLE {table_name} DROP COLUMN import_warnings"
                     ))
 
+    # Migrate visits.doctor_id FK from doctors table to users table, then drop doctors
+    if "doctors" in insp.get_table_names():
+        dialect = engine.dialect.name
+        with engine.begin() as conn:
+            if dialect == "postgresql":
+                conn.execute(sqlalchemy.text(
+                    "ALTER TABLE visits DROP CONSTRAINT IF EXISTS visits_doctor_id_fkey"
+                ))
+                conn.execute(sqlalchemy.text(
+                    "ALTER TABLE visits ADD CONSTRAINT visits_doctor_id_fkey "
+                    "FOREIGN KEY (doctor_id) REFERENCES users(id)"
+                ))
+            else:
+                # SQLite doesn't support ALTER TABLE DROP CONSTRAINT;
+                # the FK is only enforced if PRAGMA foreign_keys=ON, which
+                # SQLAlchemy leaves OFF by default — so just skip for SQLite.
+                pass
+            conn.execute(sqlalchemy.text("DROP TABLE doctors"))
+
+    # Migrate role enum values from lowercase to UPPERCASE
+    if "users" in insp.get_table_names():
+        dialect = engine.dialect.name
+        if dialect == "postgresql":
+            # PostgreSQL uses a native enum type — rename values in place
+            with engine.begin() as conn:
+                for old, new in [("admin", "ADMIN"), ("doctor", "DOCTOR"), ("nurse", "NURSE")]:
+                    # Check if the old value still exists before renaming
+                    result = conn.execute(sqlalchemy.text(
+                        "SELECT 1 FROM pg_enum WHERE enumlabel = :old "
+                        "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'userrole')"
+                    ), {"old": old})
+                    if result.fetchone():
+                        conn.execute(sqlalchemy.text(
+                            f"ALTER TYPE userrole RENAME VALUE '{old}' TO '{new}'"
+                        ))
+        else:
+            # SQLite / others store enums as plain strings
+            with engine.begin() as conn:
+                for old, new in [("admin", "ADMIN"), ("doctor", "DOCTOR"), ("nurse", "NURSE")]:
+                    conn.execute(sqlalchemy.text(
+                        "UPDATE users SET role = :new WHERE role = :old"
+                    ), {"new": new, "old": old})
+
     # Seed default admin user
     with Session(engine) as db:
         admin_user = db.query(User).filter(User.email == "admin@dentalclinic.com").first()

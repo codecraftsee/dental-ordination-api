@@ -3,8 +3,9 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.services.auth import decode_token
+from app.permissions import Permission, ROLE_PERMISSIONS
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -40,18 +41,13 @@ def get_current_user(
     return user
 
 
-def require_roles(*roles: UserRole):
-    def role_checker(current_user: Annotated[User, Depends(get_current_user)]) -> User:
-        if current_user.role not in roles:
+def require_permission(*permissions: Permission):
+    def permission_checker(current_user: Annotated[User, Depends(get_current_user)]) -> User:
+        user_perms = ROLE_PERMISSIONS.get(current_user.role, frozenset())
+        if not all(p in user_perms for p in permissions):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Insufficient permissions"
             )
         return current_user
-    return role_checker
-
-
-# Common role dependencies
-require_admin = require_roles(UserRole.ADMIN)
-require_admin_or_doctor = require_roles(UserRole.ADMIN, UserRole.DOCTOR)
-require_staff = require_roles(UserRole.ADMIN, UserRole.DOCTOR, UserRole.NURSE)
+    return permission_checker

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel, EmailStr
 from app.models.user import UserRole, Specialization
@@ -37,6 +37,7 @@ class UserResponse(BaseModel):
     phone: Optional[str] = None
     specialization: Optional[Specialization] = None
     license_number: Optional[str] = None
+    permissions: List[str] = []
     created_at: datetime
     updated_at: datetime
 

@@ -1,6 +1,7 @@
 import re
 import json
 import logging
+import random
 from io import BytesIO
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -11,7 +12,8 @@ from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 
 from app.database import SessionLocal
-from app.dependencies import require_admin
+from app.dependencies import require_permission
+from app.permissions import Permission
 from app.models.user import User, UserRole
 from app.models.patient import Patient, Gender
 from app.models.visit import Visit
@@ -37,7 +39,7 @@ def parse_gender(value) -> Gender | None:
     if not value:
         return None
     v = str(value).strip().lower()
-    logging.warning(f"parse_gender: raw={value!r}, normalized={v!r}")
+    logging.debug(f"parse_gender: raw={value!r}, normalized={v!r}")
     if v == 'm':
         return Gender.MALE
     if v in ('z', 'ž'):
@@ -103,7 +105,7 @@ def _sse(data: dict) -> str:
 @router.post("/xlsx")
 async def import_xlsx_files(
     files: List[UploadFile] = File(...),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission(Permission.ADMIN_IMPORT)),
 ):
     """Import one or more XLSX dental card files, streaming progress via SSE.
 
@@ -146,18 +148,23 @@ async def import_xlsx_files(
                     .filter(User.role == UserRole.DOCTOR)
                     .all()
                 )
-                doctor_map: dict[str, str | None] = {}  # initial letter -> user id
+                doctor_ids = [doc.id for doc in doctors]
+                doctor_map: dict[str, str] = {}  # initial letter -> user id (unique only)
+                ambiguous_initials: set[str] = set()
                 for doc in doctors:
                     first_name = doc.first_name or ""
                     initial = first_name[0].upper() if first_name else ""
                     if not initial:
                         continue
+                    if initial in ambiguous_initials:
+                        continue
                     if initial not in doctor_map:
                         doctor_map[initial] = doc.id
                     else:
-                        # Duplicate initial — mark ambiguous so it surfaces an error
-                        doctor_map[initial] = None
-                default_doctor_id = doctors[0].id if len(doctors) == 1 else None
+                        # Duplicate initial — remove from map, mark ambiguous
+                        del doctor_map[initial]
+                        ambiguous_initials.add(initial)
+                logging.info(f"Import: found {len(doctors)} doctors, {len(doctor_map)} unique initials")
             finally:
                 db.close()
 
@@ -304,16 +311,17 @@ async def import_xlsx_files(
                                 if not diagnosis_notes and not treatment_notes:
                                     continue
 
-                                # Resolve doctor
-                                doctor_id = default_doctor_id
+                                # Resolve doctor: try initial match, fall back to random
+                                doctor_id = None
                                 if doctor_initial:
-                                    mapped = doctor_map.get(doctor_initial.upper())
-                                    if mapped:
-                                        doctor_id = mapped
+                                    doctor_id = doctor_map.get(doctor_initial.upper())
+
+                                if not doctor_id and doctor_ids:
+                                    doctor_id = random.choice(doctor_ids)
 
                                 if not doctor_id:
                                     file_errors.append(
-                                        f"{filename} row {row_idx + 1}: No doctor found for initial '{doctor_initial}', skipping"
+                                        f"{filename} row {row_idx + 1}: No doctors in system, skipping"
                                     )
                                     continue
 

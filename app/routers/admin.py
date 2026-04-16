@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import require_admin
+from app.dependencies import require_permission
+from app.permissions import Permission
 from app.models.user import User
 from app.models.visit import Visit
 from app.models.patient import Patient
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 @router.delete("/visits")
 def delete_all_visits(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
 ):
     count = db.query(Visit).delete(synchronize_session=False)
     db.commit()
@@ -25,7 +26,7 @@ def delete_all_visits(
 @router.delete("/patients")
 def delete_all_patients(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
 ):
     db.query(Visit).delete(synchronize_session=False)
     count = db.query(Patient).delete(synchronize_session=False)
@@ -36,7 +37,7 @@ def delete_all_patients(
 @router.delete("/diagnoses")
 def delete_all_diagnoses(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
 ):
     count = db.query(Diagnosis).delete(synchronize_session=False)
     db.commit()
@@ -46,7 +47,7 @@ def delete_all_diagnoses(
 @router.delete("/treatments")
 def delete_all_treatments(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
 ):
     count = db.query(Treatment).delete(synchronize_session=False)
     db.commit()
@@ -56,7 +57,7 @@ def delete_all_treatments(
 @router.delete("/all")
 def delete_all_data(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
 ):
     try:
         visits = db.query(Visit).delete(synchronize_session=False)

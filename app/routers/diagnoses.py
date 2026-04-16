@@ -5,7 +5,8 @@ from app.database import get_db
 from app.models.user import User
 from app.models.diagnosis import Diagnosis, DiagnosisCategory
 from app.schemas.diagnosis import DiagnosisCreate, DiagnosisUpdate, DiagnosisResponse
-from app.dependencies import require_admin, require_admin_or_doctor, require_staff
+from app.dependencies import require_permission
+from app.permissions import Permission
 
 router = APIRouter(prefix="/api/diagnoses", tags=["diagnoses"])
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/api/diagnoses", tags=["diagnoses"])
 @router.get("", response_model=List[DiagnosisResponse])
 def list_diagnoses(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)],
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_READ))],
     category: Optional[DiagnosisCategory] = Query(None)
 ):
     query = db.query(Diagnosis)
@@ -28,7 +29,7 @@ def list_diagnoses(
 def create_diagnosis(
     diagnosis_data: DiagnosisCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_CREATE))]
 ):
     existing = db.query(Diagnosis).filter(Diagnosis.code == diagnosis_data.code).first()
     if existing:
@@ -48,7 +49,7 @@ def create_diagnosis(
 def get_diagnosis(
     diagnosis_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_READ))]
 ):
     diagnosis = db.query(Diagnosis).filter(Diagnosis.id == diagnosis_id).first()
     if not diagnosis:
@@ -64,7 +65,7 @@ def update_diagnosis(
     diagnosis_id: str,
     diagnosis_data: DiagnosisUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_UPDATE))]
 ):
     diagnosis = db.query(Diagnosis).filter(Diagnosis.id == diagnosis_id).first()
     if not diagnosis:
@@ -98,7 +99,7 @@ def update_diagnosis(
 def delete_diagnosis(
     diagnosis_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin)]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_DELETE))]
 ):
     diagnosis = db.query(Diagnosis).filter(Diagnosis.id == diagnosis_id).first()
     if not diagnosis:

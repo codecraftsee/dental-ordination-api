@@ -5,7 +5,8 @@ from app.database import get_db
 from app.models.user import User
 from app.models.patient import Patient
 from app.schemas.patient import PatientCreate, PatientUpdate, PatientResponse
-from app.dependencies import require_admin, require_admin_or_doctor, require_staff
+from app.dependencies import require_permission
+from app.permissions import Permission
 
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/api/patients", tags=["patients"])
 @router.get("", response_model=List[PatientResponse])
 def list_patients(
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)],
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_READ))],
     search: Optional[str] = Query(None),
     city: Optional[str] = Query(None),
     import_incomplete: Optional[bool] = Query(None),
@@ -41,7 +42,7 @@ def list_patients(
 def create_patient(
     patient_data: PatientCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_CREATE))]
 ):
     patient = Patient(**patient_data.model_dump())
     db.add(patient)
@@ -54,7 +55,7 @@ def create_patient(
 def get_patient(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_staff)]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_READ))]
 ):
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
@@ -70,7 +71,7 @@ def update_patient(
     patient_id: str,
     patient_data: PatientUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_UPDATE))]
 ):
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
@@ -92,7 +93,7 @@ def update_patient(
 def dismiss_import_warning(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin_or_doctor)]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_UPDATE))]
 ):
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
@@ -110,7 +111,7 @@ def dismiss_import_warning(
 def delete_patient(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_admin)]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_DELETE))]
 ):
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
