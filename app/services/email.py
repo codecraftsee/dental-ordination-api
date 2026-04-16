@@ -1,12 +1,15 @@
+import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def send_invite_email(to_email: str, first_name: str, set_password_url: str) -> None:
+    logger.info("Sending invite email to %s via %s:%s (user=%s)", to_email, settings.smtp_host, settings.smtp_port, settings.smtp_user)
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "Welcome to Dental Ordination — Set Your Password"
     msg["From"] = settings.smtp_from
@@ -44,3 +47,4 @@ def send_invite_email(to_email: str, first_name: str, set_password_url: str) -> 
         server.starttls()
         server.login(settings.smtp_user, settings.smtp_password)
         server.sendmail(settings.smtp_from, to_email, msg.as_string())
+    logger.info("Invite email sent successfully to %s", to_email)

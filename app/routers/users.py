@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -9,6 +10,8 @@ from app.services.email import send_invite_email
 from app.dependencies import require_permission
 from app.permissions import Permission
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -70,7 +73,10 @@ def create_user(
     settings = get_settings()
     token = create_invite_token(user.id)
     invite_url = f"{settings.frontend_url}/set-password?token={token}"
-    send_invite_email(user.email, data.first_name, invite_url)
+    try:
+        send_invite_email(user.email, data.first_name, invite_url)
+    except Exception as exc:
+        logger.error("Failed to send invite email to %s: %s", user.email, exc)
 
     return _to_response(user)
 
@@ -91,7 +97,10 @@ def resend_invite(
     token = create_invite_token(user.id)
     invite_url = f"{settings.frontend_url}/set-password?token={token}"
     first_name = user.first_name or user.email
-    send_invite_email(user.email, first_name, invite_url)
+    try:
+        send_invite_email(user.email, first_name, invite_url)
+    except Exception as exc:
+        logger.error("Failed to resend invite email to %s: %s", user.email, exc)
 
 
 @router.get("/{user_id}", response_model=UserResponse)
