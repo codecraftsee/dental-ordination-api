@@ -25,6 +25,18 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# CORS must be registered first so preflight OPTIONS requests are handled
+# before any other middleware (middleware runs in reverse registration order)
+settings = get_settings()
+origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.middleware("http")
 async def log_exceptions(request: Request, call_next):
@@ -35,17 +47,6 @@ async def log_exceptions(request: Request, call_next):
         logger.error(f"{request.method} {request.url.path} failed: {exc}")
         logger.error(traceback.format_exc())
         return JSONResponse(status_code=500, content={"detail": str(exc)})
-
-# CORS configuration — origins driven by ALLOWED_ORIGINS env var
-settings = get_settings()
-origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Include routers
 app.include_router(auth.router)
