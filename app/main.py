@@ -81,6 +81,39 @@ def on_startup():
                 conn.execute(sqlalchemy.text(
                     "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"
                 ))
+        else:
+            # SQLite: check if password_hash still has NOT NULL and recreate the table if so
+            with engine.begin() as conn:
+                result = conn.execute(sqlalchemy.text("PRAGMA table_info(users)"))
+                for row in result.fetchall():
+                    if row[1] == "password_hash" and row[3] == 1:  # notnull == 1
+                        conn.execute(sqlalchemy.text("""
+                            CREATE TABLE users_new (
+                                id VARCHAR(36) PRIMARY KEY,
+                                email VARCHAR(255) UNIQUE NOT NULL,
+                                password_hash VARCHAR(255),
+                                role VARCHAR(20) NOT NULL,
+                                is_active BOOLEAN DEFAULT 1,
+                                must_set_password BOOLEAN NOT NULL DEFAULT 0,
+                                first_name VARCHAR(100),
+                                last_name VARCHAR(100),
+                                phone VARCHAR(50),
+                                specialization VARCHAR(50),
+                                license_number VARCHAR(100),
+                                created_at DATETIME,
+                                updated_at DATETIME
+                            )
+                        """))
+                        conn.execute(sqlalchemy.text("""
+                            INSERT INTO users_new SELECT
+                                id, email, password_hash, role, is_active, must_set_password,
+                                first_name, last_name, phone, specialization, license_number,
+                                created_at, updated_at
+                            FROM users
+                        """))
+                        conn.execute(sqlalchemy.text("DROP TABLE users"))
+                        conn.execute(sqlalchemy.text("ALTER TABLE users_new RENAME TO users"))
+                        break
 
         # Add profile columns directly to users (replacing staff_profiles table)
         for col_def in [
