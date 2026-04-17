@@ -1,7 +1,5 @@
 import logging
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import mailtrap as mt
 from app.config import get_settings
 
 settings = get_settings()
@@ -9,11 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 def send_invite_email(to_email: str, first_name: str, set_password_url: str) -> None:
-    logger.info("Sending invite email to %s via %s:%s (user=%s)", to_email, settings.smtp_host, settings.smtp_port, settings.smtp_user)
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Welcome to Dental Ordination — Set Your Password"
-    msg["From"] = settings.smtp_from
-    msg["To"] = to_email
+    logger.info("Sending invite email to %s via Mailtrap API (inbox_id=%s)", to_email, settings.mailtrap_inbox_id or "production")
 
     plain = (
         f"Hello {first_name},\n\n"
@@ -40,11 +34,20 @@ def send_invite_email(to_email: str, first_name: str, set_password_url: str) -> 
     </html>
     """
 
-    msg.attach(MIMEText(plain, "plain"))
-    msg.attach(MIMEText(html, "html"))
+    mail = mt.Mail(
+        sender=mt.Address(email=settings.smtp_from, name="Dental Ordination"),
+        to=[mt.Address(email=to_email)],
+        subject="Welcome to Dental Ordination — Set Your Password",
+        text=plain,
+        html=html,
+    )
 
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
-        server.starttls()
-        server.login(settings.smtp_user, settings.smtp_password)
-        server.sendmail(settings.smtp_from, to_email, msg.as_string())
-    logger.info("Invite email sent successfully to %s", to_email)
+    sandbox = bool(settings.mailtrap_inbox_id)
+    client = mt.MailtrapClient(
+        token=settings.mailtrap_api_token,
+        sandbox=sandbox,
+        **({"inbox_id": int(settings.mailtrap_inbox_id)} if sandbox else {}),
+    )
+
+    response = client.send(mail)
+    logger.info("Invite email sent successfully to %s: %s", to_email, response)

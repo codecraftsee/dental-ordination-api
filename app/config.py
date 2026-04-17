@@ -12,11 +12,9 @@ class Settings(BaseSettings):
     # CORS
     allowed_origins: str = "http://localhost:4200,https://codecraftsee.github.io,https://dental-ordination.vercel.app"
 
-    # Email / SMTP
-    smtp_host: str = "sandbox.smtp.mailtrap.io"
-    smtp_port: int = 587
-    smtp_user: str = ""
-    smtp_password: str = ""
+    # Email — Mailtrap API
+    mailtrap_api_token: str = ""
+    mailtrap_inbox_id: str = ""  # sandbox only; leave empty for production sending
     smtp_from: str = "noreply@dentalclinic.com"
 
     # Frontend base URL used to build invite links
