@@ -1,3 +1,5 @@
+from urllib.parse import urlparse
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.config import get_settings
@@ -8,7 +10,9 @@ connect_args = {}
 engine_kwargs = {"pool_pre_ping": True}
 
 if settings.database_url.startswith("postgresql"):
-    connect_args["sslmode"] = "require"
+    host = (urlparse(settings.database_url).hostname or "").lower()
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        connect_args["sslmode"] = "require"
     engine_kwargs.update({"pool_size": 5, "max_overflow": 10})
 
 if connect_args:

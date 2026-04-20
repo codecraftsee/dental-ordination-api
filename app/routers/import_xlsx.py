@@ -5,9 +5,9 @@ import random
 from io import BytesIO
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, List
+from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 
@@ -105,6 +105,7 @@ def _sse(data: dict) -> str:
 @router.post("/xlsx")
 async def import_xlsx_files(
     files: List[UploadFile] = File(...),
+    doctor_id: Optional[str] = Form(None),
     current_user: User = Depends(require_permission(Permission.ADMIN_IMPORT)),
 ):
     """Import one or more XLSX dental card files, streaming progress via SSE.
@@ -112,11 +113,33 @@ async def import_xlsx_files(
     Each file creates/updates a patient and imports their visit history.
     Requires admin role.
 
+    If `doctor_id` is provided, that doctor is assigned to every imported visit,
+    overriding per-row initial matching and the random fallback. If omitted, the
+    original behaviour applies (match by first-name initial, fall back to random).
+
     Streams three event types:
     - progress: emitted before each file starts processing
     - file_done: emitted after each file completes (success or per-file error)
     - complete: emitted once after all files are processed, with the full summary
     """
+    override_doctor_id: Optional[str] = None
+    if doctor_id:
+        db = SessionLocal()
+        try:
+            doctor = (
+                db.query(User)
+                .filter(User.id == doctor_id, User.role == UserRole.DOCTOR)
+                .first()
+            )
+            if not doctor:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Doctor with id {doctor_id} not found",
+                )
+            override_doctor_id = doctor.id
+        finally:
+            db.close()
+
     # Read all file contents eagerly before returning StreamingResponse.
     # UploadFile handles are closed by FastAPI once the endpoint returns,
     # so they cannot be awaited inside the generator.
@@ -311,15 +334,16 @@ async def import_xlsx_files(
                                 if not diagnosis_notes and not treatment_notes:
                                     continue
 
-                                # Resolve doctor: try initial match, fall back to random
-                                doctor_id = None
-                                if doctor_initial:
-                                    doctor_id = doctor_map.get(doctor_initial.upper())
+                                # Resolve doctor: caller-supplied override wins for every
+                                # visit; otherwise try initial match, fall back to random.
+                                resolved_doctor_id: str | None = override_doctor_id
+                                if not resolved_doctor_id and doctor_initial:
+                                    resolved_doctor_id = doctor_map.get(doctor_initial.upper())
 
-                                if not doctor_id and doctor_ids:
-                                    doctor_id = random.choice(doctor_ids)
+                                if not resolved_doctor_id and doctor_ids:
+                                    resolved_doctor_id = random.choice(doctor_ids)
 
-                                if not doctor_id:
+                                if not resolved_doctor_id:
                                     file_errors.append(
                                         f"{filename} row {row_idx + 1}: No doctors in system, skipping"
                                     )
@@ -340,7 +364,7 @@ async def import_xlsx_files(
 
                                 visit = Visit(
                                     patient_id=patient.id,
-                                    doctor_id=doctor_id,
+                                    doctor_id=resolved_doctor_id,
                                     date=visit_date,
                                     tooth_number=tooth_number,
                                     diagnosis_notes=diagnosis_notes,

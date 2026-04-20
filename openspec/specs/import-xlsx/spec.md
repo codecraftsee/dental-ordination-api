@@ -9,7 +9,10 @@ Content-Type: multipart/form-data
 ```
 
 **Auth:** Admin role required (`require_admin` dependency).
-**Input:** One or more files under the `files` form field.
+**Input:**
+- `files` *(required)* — one or more XLSX files under the `files` form field.
+- `doctor_id` *(optional)* — UUID of a user with role `DOCTOR`. When present, that doctor is assigned to every imported visit; per-row initial matching and the random fallback are skipped. An invalid or non-doctor id returns `400`.
+
 **Response:** `text/event-stream` — streams Server-Sent Events as files are processed.
 
 ---
@@ -17,9 +20,17 @@ Content-Type: multipart/form-data
 ## Behaviour
 
 1. All uploaded file contents are read eagerly before streaming begins (UploadFile handles are closed by FastAPI once the endpoint returns, so reads must happen before the generator starts).
-2. Doctors are pre-loaded once and indexed by first-name initial for visit-row resolution.
-3. Each file is processed independently — a failure in one file does not affect others (per-file commit/rollback).
-4. The stream always ends with a `complete` event, even on catastrophic failure.
+2. If `doctor_id` is provided, it is validated (must exist and have role `DOCTOR`) before file reads begin — an invalid id fails fast with `HTTP 400` before any streaming.
+3. Doctors are pre-loaded once and indexed by first-name initial for visit-row resolution (unused when `doctor_id` is supplied, but still loaded as the random-fallback pool).
+4. Each file is processed independently — a failure in one file does not affect others (per-file commit/rollback).
+5. The stream always ends with a `complete` event, even on catastrophic failure.
+
+### Doctor resolution per visit row
+
+1. If the caller supplied `doctor_id`, use it for every visit (no exceptions).
+2. Otherwise, if the row's column 5 contains a first-name initial unique to exactly one doctor in the system, use that doctor.
+3. Otherwise, assign a random doctor from the system.
+4. If no doctors exist in the system at all, the row is skipped with an error.
 
 ### Excel file structure expected
 
