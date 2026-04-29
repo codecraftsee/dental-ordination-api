@@ -4,7 +4,7 @@ import traceback
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import auth, users, patients, diagnoses, treatments, visits, import_xlsx, admin
+from app.routers import auth, users, patients, diagnoses, treatments, visits, import_xlsx, admin, patient_documents
 from app.database import engine, Base
 from app.config import get_settings
 from app.models import User
@@ -57,6 +57,7 @@ app.include_router(treatments.router)
 app.include_router(visits.router)
 app.include_router(import_xlsx.router)
 app.include_router(admin.router)
+app.include_router(patient_documents.router)
 
 
 @app.on_event("startup")

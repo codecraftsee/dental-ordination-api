@@ -33,6 +33,11 @@ class Permission(str, PyEnum):
     USERS_UPDATE = "users:update"
     USERS_DELETE = "users:delete"
 
+    # Patient documents
+    PATIENT_DOCUMENTS_READ = "patient_documents:read"
+    PATIENT_DOCUMENTS_CREATE = "patient_documents:create"
+    PATIENT_DOCUMENTS_DELETE = "patient_documents:delete"
+
     # Admin
     ADMIN_IMPORT = "admin:import"
     ADMIN_BULK_DELETE = "admin:bulk_delete"
@@ -56,6 +61,9 @@ _DOCTOR = frozenset({
     Permission.TREATMENTS_CREATE,
     Permission.TREATMENTS_UPDATE,
     Permission.USERS_READ,
+    Permission.PATIENT_DOCUMENTS_READ,
+    Permission.PATIENT_DOCUMENTS_CREATE,
+    Permission.PATIENT_DOCUMENTS_DELETE,
 })
 
 # Nurse: read-only
@@ -65,6 +73,7 @@ _NURSE = frozenset({
     Permission.DIAGNOSES_READ,
     Permission.TREATMENTS_READ,
     Permission.USERS_READ,
+    Permission.PATIENT_DOCUMENTS_READ,
 })
 
 ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {

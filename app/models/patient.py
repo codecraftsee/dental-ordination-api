@@ -31,3 +31,9 @@ class Patient(Base):
 
     user = relationship("User", backref="patient_profile")
     visits = relationship("Visit", back_populates="patient", cascade="all, delete-orphan")
+    documents = relationship(
+        "PatientDocument",
+        back_populates="patient",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
