@@ -39,7 +39,7 @@ def list_users(
     current_user: Annotated[User, Depends(require_permission(Permission.USERS_READ))],
     role: Optional[UserRole] = Query(None),
 ):
-    query = db.query(User)
+    query = db.query(User).filter(User.is_active == True)
     if current_user.role != UserRole.ADMIN:
         query = query.filter(User.role != UserRole.ADMIN)
     if role:
@@ -149,5 +149,5 @@ def delete_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    db.delete(user)
+    user.is_active = False
     db.commit()
