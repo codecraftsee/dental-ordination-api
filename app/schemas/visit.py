@@ -35,11 +35,21 @@ class VisitUpdate(BaseModel):
     paid: Optional[bool] = None
 
 
+class DoctorBrief(BaseModel):
+    id: UUID
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 class VisitResponse(VisitBase):
     id: UUID
     import_incomplete: bool
     created_at: datetime
     updated_at: datetime
+    doctor: Optional[DoctorBrief] = None
 
     class Config:
         from_attributes = True

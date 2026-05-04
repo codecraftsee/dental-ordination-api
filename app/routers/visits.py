@@ -1,7 +1,7 @@
 from typing import Annotated, List, Optional
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.models.user import User
 from app.models.visit import Visit
@@ -22,7 +22,7 @@ def list_visits(
     date_to: Optional[date] = Query(None),
     import_incomplete: Optional[bool] = Query(None),
 ):
-    query = db.query(Visit)
+    query = db.query(Visit).options(joinedload(Visit.doctor))
 
     if patient_id:
         query = query.filter(Visit.patient_id == patient_id)
