@@ -1,13 +1,15 @@
 import logging
-import mailtrap as mt
+import resend
 from app.config import get_settings
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
+resend.api_key = settings.resend_api_key
+
 
 def send_invite_email(to_email: str, first_name: str, set_password_url: str) -> None:
-    logger.info("Sending invite email to %s via Mailtrap API (inbox_id=%s)", to_email, settings.mailtrap_inbox_id or "production")
+    logger.info("Sending invite email to %s via Resend", to_email)
 
     plain = (
         f"Hello {first_name},\n\n"
@@ -34,20 +36,13 @@ def send_invite_email(to_email: str, first_name: str, set_password_url: str) -> 
     </html>
     """
 
-    mail = mt.Mail(
-        sender=mt.Address(email=settings.smtp_from, name="Dental Ordination"),
-        to=[mt.Address(email=to_email)],
-        subject="Welcome to Dental Ordination — Set Your Password",
-        text=plain,
-        html=html,
-    )
+    params: resend.Emails.SendParams = {
+        "from": settings.email_from,
+        "to": [to_email],
+        "subject": "Welcome to Dental Ordination — Set Your Password",
+        "text": plain,
+        "html": html,
+    }
 
-    sandbox = bool(settings.mailtrap_inbox_id)
-    client = mt.MailtrapClient(
-        token=settings.mailtrap_api_token,
-        sandbox=sandbox,
-        **({"inbox_id": int(settings.mailtrap_inbox_id)} if sandbox else {}),
-    )
-
-    response = client.send(mail)
-    logger.info("Invite email sent successfully to %s: %s", to_email, response)
+    response = resend.Emails.send(params)
+    logger.info("Invite email sent successfully to %s: id=%s", to_email, response["id"])
