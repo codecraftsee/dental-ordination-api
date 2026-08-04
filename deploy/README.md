@@ -44,7 +44,7 @@ git push
 
 export DENTAL_SERVER=deploy@<SERVER_IP>
 ./deploy/deploy-api.sh      # API
-./deploy/deploy-web.sh      # Angular (needs a `staging` config in angular.json)
+./deploy/deploy-web.sh      # Angular (needs a `preprod` config in angular.json)
 ```
 
 ## Local smoke test
