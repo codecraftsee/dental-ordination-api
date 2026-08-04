@@ -3,6 +3,9 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
+    # Which environment this instance is running as: local | preprod | production
+    app_env: str = "local"
+
     database_url: str = "postgresql://postgres:password@localhost:5432/dental_ordination"
     secret_key: str = "your-super-secret-key-change-in-production"
     algorithm: str = "HS256"

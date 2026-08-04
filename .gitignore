@@ -10,7 +10,15 @@ env/
 ENV/
 
 # Environment
+# Ignore every .env variant (.env.docker, .env.preprod, ...) so a real secrets
+# file can never be committed by accident. The two examples are opt-in.
 .env
+.env.*
+!.env.example
+!.env.preprod.example
+
+# Local Docker smoke test — stand-in for the Angular bundle
+www-local/
 
 # IDE
 .idea/

@@ -1,0 +1,55 @@
+# Pre-production stack: FastAPI behind Caddy with automatic HTTPS.
+#
+# Server:
+#   cd /opt/dental/app
+#   docker compose --env-file /opt/dental/.env up -d --build
+#
+# Local smoke test (see deploy/README.md):
+#   ENV_FILE=.env.docker docker compose --env-file .env.docker up -d --build
+
+services:
+  api:
+    build: .
+    image: dental-api:preprod
+    restart: unless-stopped
+    # Real env vars, injected at runtime. pydantic-settings gives these priority
+    # over any .env file, and .dockerignore keeps .env out of the image entirely.
+    env_file:
+      - ${ENV_FILE:-/opt/dental/.env}
+    # `expose`, not `ports` — deliberately unreachable from the host. Publishing
+    # 8000 would expose the API over plaintext HTTP on the server's IP,
+    # bypassing TLS. Only Caddy, on the shared network, can reach it.
+    expose:
+      - "8000"
+    networks:
+      - dental
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"     # required for the Let's Encrypt HTTP-01 challenge
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      API_HOST: ${API_HOST}
+      ADMIN_HOST: ${ADMIN_HOST}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${WWW_DIR:-/opt/dental/www}:/srv/www:ro
+      # Named volumes so issued certificates survive `docker compose down`.
+      # Losing these means re-requesting certs and burning Let's Encrypt quota.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    networks:
+      - dental
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  dental:

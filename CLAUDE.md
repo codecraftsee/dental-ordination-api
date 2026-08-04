@@ -73,7 +73,7 @@ venv/Scripts/uvicorn.exe app.main:app --reload
 
 ## Default Admin
 - Email: `admin@dentalclinic.com`
-- Password: `p5zTCyUJ^B#^Juvy^%bj` (seeded on first startup if user doesn't exist)
+- Password: `Test123#` (seeded on first startup if the user doesn't exist — see `app/main.py:230`)
 
 ## Environment Variables (.env)
 ```
@@ -95,6 +95,14 @@ Driven by `ALLOWED_ORIGINS` env var (comma-separated). Defaults:
 - `http://localhost:4200`
 - `https://codecraftsee.github.io`
 - `https://dental-ordination.vercel.app`
+
+## Pre-production (Hetzner)
+- Deploys from the **`preprod`** branch, never `develop`
+- Docker Compose: FastAPI behind Caddy with automatic HTTPS — see [`deploy/README.md`](deploy/README.md)
+- Server config lives at `/opt/dental/.env` only; the local `.env` is never used by a deploy
+- `GET /health` returns `{"status": "healthy", "env": "..."}` — `env` comes from `APP_ENV`
+- Frontend is served as static files from `/opt/dental/www`; it still needs a
+  `staging` build configuration in the Angular repo before it can be deployed
 
 ## Production (Railway + Supabase)
 - **API**: Railway (free tier) — auto-deploys from `develop` branch
