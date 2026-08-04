@@ -102,7 +102,7 @@ Driven by `ALLOWED_ORIGINS` env var (comma-separated). Defaults:
 - Server config lives at `/opt/dental/.env` only; the local `.env` is never used by a deploy
 - `GET /health` returns `{"status": "healthy", "env": "..."}` — `env` comes from `APP_ENV`
 - Frontend is served as static files from `/opt/dental/www`; it still needs a
-  `staging` build configuration in the Angular repo before it can be deployed
+  `preprod` build configuration in the Angular repo before it can be deployed
 
 ## Production (Railway + Supabase)
 - **API**: Railway (free tier) — auto-deploys from `develop` branch

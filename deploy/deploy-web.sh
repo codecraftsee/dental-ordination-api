@@ -5,8 +5,8 @@
 #   export DENTAL_SERVER=deploy@5.161.42.7
 #   ./deploy/deploy-web.sh
 #
-# REQUIRES a `staging` build configuration in the Angular repo's angular.json,
-# with a matching src/environments/environment.staging.ts pointing apiUrl at
+# REQUIRES a `preprod` build configuration in the Angular repo's angular.json,
+# with a matching src/environments/environment.preprod.ts pointing apiUrl at
 # https://$API_HOST. Until that exists this script exits early rather than
 # shipping a bundle that still points at Railway.
 set -euo pipefail
@@ -20,10 +20,10 @@ cd "$WEB_REPO"
 WEB_ROOT="$(pwd)"
 echo "==> Frontend repo: ${WEB_ROOT}"
 
-if ! grep -q '"staging"' angular.json; then
-	echo "!! No 'staging' configuration found in angular.json." >&2
-	echo "!! Add a 'staging' configuration to angular.json (with a matching" >&2
-	echo "!! src/environments/environment.staging.ts) before deploying." >&2
+if ! grep -q '"preprod"' angular.json; then
+	echo "!! No 'preprod' configuration found in angular.json." >&2
+	echo "!! Add a 'preprod' configuration to angular.json (with a matching" >&2
+	echo "!! src/environments/environment.preprod.ts) before deploying." >&2
 	exit 1
 fi
 
@@ -37,8 +37,8 @@ fi
 echo "==> Installing dependencies"
 npm ci
 
-echo "==> Building (configuration: staging, base-href: /)"
-npx ng build --configuration staging --base-href /
+echo "==> Building (configuration: preprod, base-href: /)"
+npx ng build --configuration preprod --base-href /
 
 DIST="dist/dental-ordination/browser"
 [[ -f "${DIST}/index.html" ]] || { echo "!! ${DIST}/index.html missing" >&2; exit 1; }
