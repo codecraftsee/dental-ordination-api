@@ -83,13 +83,23 @@ REMAINING MANUAL STEPS
 
 2. Only once step 1 succeeds, harden SSH:
 
-       cat > /etc/ssh/sshd_config.d/99-hardening.conf <<'CONF'
+       cat > /etc/ssh/sshd_config.d/01-hardening.conf <<'CONF'
        PermitRootLogin no
        PasswordAuthentication no
        CONF
-       systemctl restart ssh
+       sshd -t && systemctl restart ssh ssh.socket
 
-   Then confirm a NEW ssh session still works before closing this one.
+   The '01-' prefix is REQUIRED, not cosmetic. OpenSSH honours the FIRST
+   occurrence of a setting, and cloud images ship 50-cloud-init.conf
+   containing 'PasswordAuthentication yes'. A 99- prefix sorts after it and
+   is silently ignored — the file looks applied but passwords stay enabled.
+   Do not edit 50-cloud-init.conf instead: cloud-init regenerates it, so the
+   change would revert on a later boot.
+
+   Then confirm a NEW ssh session still works before closing this one, and
+   verify the setting actually took effect:
+
+       sshd -T | grep -E 'permitrootlogin|passwordauthentication'
 
 3. Firewall — in the Hetzner Cloud Console (not on this box), create a
    firewall with inbound rules and apply it to this server:
