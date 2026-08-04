@@ -1,0 +1,40 @@
+# Hostnames come from the server's .env via docker-compose `environment:`.
+# Swapping sslip.io for the real domain is two lines in that file — Caddy
+# requests new certificates automatically on restart.
+
+{
+	email {$ACME_EMAIL}
+}
+
+# --- API --------------------------------------------------------------------
+{$API_HOST} {
+	# Sanity guard against unbounded uploads. Patient documents cap at 25 MB
+	# (app/routers/patient_documents.py:22) and XLSX import accepts several
+	# files per request, so this sits well clear of legitimate traffic.
+	request_body {
+		max_size 100MB
+	}
+
+	reverse_proxy api:8000 {
+		# app/routers/import_xlsx.py returns a StreamingResponse with
+		# media_type="text/event-stream". Without disabling buffering the
+		# frontend's progress bar sits at 0% and then jumps straight to 100%
+		# when the whole stream flushes at once.
+		flush_interval -1
+	}
+
+	# No `encode` here on purpose: compression middleware interacts badly with
+	# Server-Sent Events. JSON payloads are small enough that it costs nothing.
+}
+
+# --- Admin web app ----------------------------------------------------------
+{$ADMIN_HOST} {
+	encode gzip zstd
+
+	root * /srv/www
+	# Angular uses client-side routing (src/app/app.routes.ts). Without this
+	# fallback, refreshing on /patients/:id or following a /set-password?token=
+	# invite link would 404 instead of reaching the app.
+	try_files {path} /index.html
+	file_server
+}

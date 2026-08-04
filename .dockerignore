@@ -1,0 +1,38 @@
+# Secrets must never enter the image — config comes from real env vars at runtime.
+.env
+.env.*
+
+# VCS / tooling
+.git
+.gitignore
+.github
+.claude
+.python-version
+
+# Local Python
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local data
+*.db
+*.log
+
+# Not needed at runtime
+tests/
+docs/
+deploy/
+specs/
+openspec/
+README.md
+CLAUDE.md
+Procfile
+Dockerfile
+docker-compose.yml
+Caddyfile
