@@ -1,0 +1,30 @@
+# Local/CI test database.
+#
+# Separate from docker-compose.yml (the preprod stack), which deliberately has
+# no db service because preprod points at managed Postgres. This file exists so
+# tests run on the same engine as production — no SQLite anywhere.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   pytest
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dental
+      POSTGRES_PASSWORD: dental
+      POSTGRES_DB: dental_test
+    ports:
+      # 55432, not 5432 — so this can never collide with (or be mistaken for)
+      # a real Postgres you have running locally.
+      - "55432:5432"
+    tmpfs:
+      # Data lives in RAM and dies with the container. Tests must never depend
+      # on state surviving a restart, and this makes that structurally true.
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dental -d dental_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

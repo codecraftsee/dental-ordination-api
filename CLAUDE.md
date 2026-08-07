@@ -2,7 +2,7 @@
 
 ## Tech Stack
 - **Framework**: FastAPI
-- **Database**: PostgreSQL (prod) / SQLite (local dev)
+- **Database**: PostgreSQL everywhere — local dev, tests, and deployed. No SQLite.
 - **ORM**: SQLAlchemy 2.x
 - **Auth**: JWT (access + refresh tokens) via python-jose, bcrypt via passlib
 - **Validation**: Pydantic v2
@@ -12,6 +12,24 @@
 ```bash
 venv/Scripts/uvicorn.exe app.main:app --reload
 ```
+
+## Tests
+Tests run against **real PostgreSQL**, never SQLite — same engine as production.
+
+```bash
+docker compose -f docker-compose.test.yml up -d   # test db on port 55432
+pytest
+docker compose -f docker-compose.test.yml down    # when finished
+```
+
+- `tests/conftest.py` points the whole process at the test database *before*
+  importing `app.*`, because `app/database.py` builds its engine at import time
+  and `app/routers/import_xlsx.py` bypasses the `get_db` dependency.
+- Each session drops and recreates the `public` schema, so `create_all()` plus
+  the startup migrations in `app/main.py` run from scratch. A guard refuses to
+  start unless the database name contains `test`.
+- The suite is characterization-style: it pins current status codes and
+  `detail` strings so refactors can't silently change the API contract.
 
 ## User Roles
 | Role | Description |
@@ -77,24 +95,30 @@ venv/Scripts/uvicorn.exe app.main:app --reload
 
 ## Environment Variables (.env)
 ```
-DATABASE_URL=sqlite:///./dental_ordination.db
+DATABASE_URL=postgresql://postgres:password@localhost:5432/dental_ordination
 SECRET_KEY=your-secret-key
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
-ALLOWED_ORIGINS=http://localhost:4200,https://codecraftsee.github.io
+ALLOWED_ORIGINS=http://localhost:4200
 FRONTEND_URL=http://localhost:4200
 ```
 
 ## Known Issues & Fixes
 - **passlib + bcrypt 5.x incompatibility**: pin `bcrypt<4.1` in requirements.txt
-- **SQLite local / PostgreSQL prod**: `DATABASE_URL` in `.env` controls which is used
+- **Vestigial SQLite support**: `app/main.py` still carries `if is_postgres: … else:`
+  branches (a table-rebuild path, an enum-value update, an FK skip) from when local
+  dev used SQLite. Nothing runs on SQLite any more; this code is queued for removal
+  along with the startup migrations.
 
 ## CORS Allowed Origins
-Driven by `ALLOWED_ORIGINS` env var (comma-separated). Defaults:
-- `http://localhost:4200`
-- `https://codecraftsee.github.io`
-- `https://dental-ordination.vercel.app`
+Driven by the `ALLOWED_ORIGINS` env var (comma-separated). The default is
+`http://localhost:4200` only — a local-dev fallback.
+
+Every deployed environment **must set `ALLOWED_ORIGINS` explicitly**; if it is
+omitted the deployed frontend's requests get blocked. Deployment hostnames are
+deliberately not baked into the default, so a retired host can never keep CORS
+access by accident.
 
 ## Pre-production (Hetzner)
 - Deploys from the **`preprod`** branch, never `develop`
@@ -104,9 +128,11 @@ Driven by `ALLOWED_ORIGINS` env var (comma-separated). Defaults:
 - Frontend is served as static files from `/opt/dental/www`; it still needs a
   `preprod` build configuration in the Angular repo before it can be deployed
 
-## Production (Railway + Supabase)
-- **API**: Railway (free tier) — auto-deploys from `develop` branch
-- **Database**: Supabase PostgreSQL (free tier) — connection string set via `DATABASE_URL` env var
-- **Frontend**: Vercel (free) — Angular static site
-- **Procfile**: `web: uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-- Railway env vars: `DATABASE_URL`, `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `REFRESH_TOKEN_EXPIRE_DAYS`, `ALLOWED_ORIGINS`, `FRONTEND_URL`
+## Production
+There is no separate production environment. The Hetzner box above is the only
+deployment. Railway (API) and Vercel (frontend) were both retired — do not add
+`Procfile`, `railway.json`, or Vercel config back.
+
+Still hosted by Supabase, and unaffected by that move:
+- **Database** — PostgreSQL, set via `DATABASE_URL` (pooler host)
+- **Storage** — patient document uploads, see `app/services/storage.py`

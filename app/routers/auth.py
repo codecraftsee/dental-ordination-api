@@ -5,34 +5,16 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import TokenResponse, RefreshRequest, ChangePasswordRequest, SetPasswordRequest
-from app.schemas.user import UserResponse
+from app.schemas.user import UserResponse, to_user_response
 from app.services.auth import (
     verify_password, get_password_hash,
     create_access_token, create_refresh_token, decode_token,
     verify_invite_token,
 )
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_or_404
 from app.permissions import get_permissions_for_role
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-
-def _me_response(user: User) -> UserResponse:
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        role=user.role,
-        is_active=user.is_active,
-        must_set_password=user.must_set_password,
-        permissions=get_permissions_for_role(user.role),
-        first_name=user.first_name,
-        last_name=user.last_name,
-        phone=user.phone,
-        specialization=user.specialization,
-        license_number=user.license_number,
-        created_at=user.created_at,
-        updated_at=user.updated_at,
-    )
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -66,10 +48,8 @@ def set_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Passwords do not match")
 
     user_id = verify_invite_token(request.token)
-    user = db.query(User).filter(User.id == user_id).first()
+    user = get_or_404(db, User, user_id, "User")
 
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not user.must_set_password:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password has already been set. Use change-password instead.")
     if not user.is_active:
@@ -125,4 +105,6 @@ def change_password(
 
 @router.get("/me", response_model=UserResponse)
 def get_me(current_user: Annotated[User, Depends(get_current_user)]):
-    return _me_response(current_user)
+    return to_user_response(
+        current_user, permissions=get_permissions_for_role(current_user.role)
+    )

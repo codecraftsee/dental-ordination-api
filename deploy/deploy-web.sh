@@ -8,7 +8,7 @@
 # REQUIRES a `preprod` build configuration in the Angular repo's angular.json,
 # with a matching src/environments/environment.preprod.ts pointing apiUrl at
 # https://$API_HOST. Until that exists this script exits early rather than
-# shipping a bundle that still points at Railway.
+# shipping a bundle whose apiUrl points somewhere else.
 set -euo pipefail
 
 SERVER="${DENTAL_SERVER:?Set DENTAL_SERVER, e.g. export DENTAL_SERVER=deploy@5.161.42.7}"

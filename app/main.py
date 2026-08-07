@@ -1,5 +1,5 @@
 import logging
-import traceback
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,10 +19,19 @@ from sqlalchemy import inspect
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # run_startup_migrations is defined further down; the name is resolved when
+    # this runs, which is after the module has finished importing.
+    run_startup_migrations()
+    yield
+
+
 app = FastAPI(
     title="Dental Ordination API",
     description="Backend API for Dental Ordination management system",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 settings = get_settings()
@@ -32,12 +41,16 @@ origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
 @app.middleware("http")
 async def log_exceptions(request: Request, call_next):
     try:
-        response = await call_next(request)
-        return response
-    except Exception as exc:
-        logger.error(f"{request.method} {request.url.path} failed: {exc}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(status_code=500, content={"detail": str(exc)})
+        return await call_next(request)
+    except Exception:
+        # Anything reaching here is an unhandled crash: FastAPI converts
+        # HTTPException further in, so this is never a deliberate 4xx. The
+        # exception text routinely carries the failing SQL and connection
+        # details, so it is logged server-side and never returned.
+        logger.exception("%s %s failed", request.method, request.url.path)
+        return JSONResponse(
+            status_code=500, content={"detail": "Internal server error"}
+        )
 
 
 # CORS is registered last so it becomes the outermost middleware layer,
@@ -62,8 +75,8 @@ app.include_router(admin.router)
 app.include_router(patient_documents.router)
 
 
-@app.on_event("startup")
-def on_startup():
+def run_startup_migrations():
+    """Create tables, apply the hand-rolled migrations, then seed defaults."""
     Base.metadata.create_all(bind=engine)
 
     insp = inspect(engine)

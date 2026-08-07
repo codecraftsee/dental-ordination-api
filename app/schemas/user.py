@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 from app.models.user import UserRole, Specialization
 
 
@@ -41,5 +41,28 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+def to_user_response(user, permissions: Optional[List[str]] = None) -> UserResponse:
+    """Build a UserResponse from a User row.
+
+    `permissions` is populated only for /api/auth/me. The user-management
+    endpoints deliberately leave it empty — the frontend drives its menu off the
+    logged-in user's own permissions, not other people's.
+    """
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        role=user.role,
+        is_active=user.is_active,
+        must_set_password=user.must_set_password,
+        permissions=permissions or [],
+        first_name=user.first_name,
+        last_name=user.last_name,
+        phone=user.phone,
+        specialization=user.specialization,
+        license_number=user.license_number,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+    )

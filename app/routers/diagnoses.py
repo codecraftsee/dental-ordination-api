@@ -1,11 +1,16 @@
 from typing import Annotated, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, status, Query
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.models.diagnosis import Diagnosis, DiagnosisCategory
 from app.schemas.diagnosis import DiagnosisCreate, DiagnosisUpdate, DiagnosisResponse
-from app.dependencies import require_permission
+from app.dependencies import (
+    apply_update,
+    ensure_code_available,
+    get_or_404,
+    require_permission,
+)
 from app.permissions import Permission
 
 router = APIRouter(prefix="/api/diagnoses", tags=["diagnoses"])
@@ -31,12 +36,9 @@ def create_diagnosis(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_CREATE))]
 ):
-    existing = db.query(Diagnosis).filter(Diagnosis.code == diagnosis_data.code).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Diagnosis code already exists"
-        )
+    ensure_code_available(
+        db, Diagnosis, diagnosis_data.code, "Diagnosis code already exists"
+    )
 
     diagnosis = Diagnosis(**diagnosis_data.model_dump())
     db.add(diagnosis)
@@ -51,13 +53,7 @@ def get_diagnosis(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_READ))]
 ):
-    diagnosis = db.query(Diagnosis).filter(Diagnosis.id == diagnosis_id).first()
-    if not diagnosis:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Diagnosis not found"
-        )
-    return diagnosis
+    return get_or_404(db, Diagnosis, diagnosis_id, "Diagnosis")
 
 
 @router.put("/{diagnosis_id}", response_model=DiagnosisResponse)
@@ -67,29 +63,20 @@ def update_diagnosis(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_UPDATE))]
 ):
-    diagnosis = db.query(Diagnosis).filter(Diagnosis.id == diagnosis_id).first()
-    if not diagnosis:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Diagnosis not found"
-        )
+    diagnosis = get_or_404(db, Diagnosis, diagnosis_id, "Diagnosis")
 
     update_data = diagnosis_data.model_dump(exclude_unset=True)
 
     if "code" in update_data:
-        existing = db.query(Diagnosis).filter(
-            Diagnosis.code == update_data["code"],
-            Diagnosis.id != diagnosis_id
-        ).first()
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Diagnosis code already in use"
-            )
+        ensure_code_available(
+            db,
+            Diagnosis,
+            update_data["code"],
+            "Diagnosis code already in use",
+            exclude_id=diagnosis_id,
+        )
 
-    for key, value in update_data.items():
-        setattr(diagnosis, key, value)
-
+    apply_update(diagnosis, update_data)
     db.commit()
     db.refresh(diagnosis)
     return diagnosis
@@ -101,11 +88,6 @@ def delete_diagnosis(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_DELETE))]
 ):
-    diagnosis = db.query(Diagnosis).filter(Diagnosis.id == diagnosis_id).first()
-    if not diagnosis:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Diagnosis not found"
-        )
+    diagnosis = get_or_404(db, Diagnosis, diagnosis_id, "Diagnosis")
     db.delete(diagnosis)
     db.commit()

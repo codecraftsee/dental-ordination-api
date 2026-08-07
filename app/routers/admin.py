@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -12,11 +14,13 @@ from app.models.treatment import Treatment
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
+BulkDeleteAuth = Annotated[User, Depends(require_permission(Permission.ADMIN_BULK_DELETE))]
+
 
 @router.delete("/visits")
 def delete_all_visits(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
+    db: Annotated[Session, Depends(get_db)],
+    _: BulkDeleteAuth,
 ):
     count = db.query(Visit).delete(synchronize_session=False)
     db.commit()
@@ -25,8 +29,8 @@ def delete_all_visits(
 
 @router.delete("/patients")
 def delete_all_patients(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
+    db: Annotated[Session, Depends(get_db)],
+    _: BulkDeleteAuth,
 ):
     db.query(Visit).delete(synchronize_session=False)
     count = db.query(Patient).delete(synchronize_session=False)
@@ -36,8 +40,8 @@ def delete_all_patients(
 
 @router.delete("/diagnoses")
 def delete_all_diagnoses(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
+    db: Annotated[Session, Depends(get_db)],
+    _: BulkDeleteAuth,
 ):
     count = db.query(Diagnosis).delete(synchronize_session=False)
     db.commit()
@@ -46,8 +50,8 @@ def delete_all_diagnoses(
 
 @router.delete("/treatments")
 def delete_all_treatments(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
+    db: Annotated[Session, Depends(get_db)],
+    _: BulkDeleteAuth,
 ):
     count = db.query(Treatment).delete(synchronize_session=False)
     db.commit()
@@ -56,18 +60,14 @@ def delete_all_treatments(
 
 @router.delete("/all")
 def delete_all_data(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission(Permission.ADMIN_BULK_DELETE)),
+    db: Annotated[Session, Depends(get_db)],
+    _: BulkDeleteAuth,
 ):
-    try:
-        visits = db.query(Visit).delete(synchronize_session=False)
-        patients = db.query(Patient).delete(synchronize_session=False)
-        diagnoses = db.query(Diagnosis).delete(synchronize_session=False)
-        treatments = db.query(Treatment).delete(synchronize_session=False)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+    visits = db.query(Visit).delete(synchronize_session=False)
+    patients = db.query(Patient).delete(synchronize_session=False)
+    diagnoses = db.query(Diagnosis).delete(synchronize_session=False)
+    treatments = db.query(Treatment).delete(synchronize_session=False)
+    db.commit()
     return {
         "visits": visits,
         "patients": patients,

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from app.utils import utcnow
 from enum import Enum as PyEnum
 from sqlalchemy import Column, String, Date, DateTime, Enum, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
@@ -26,8 +26,8 @@ class Patient(Base):
     phone = Column(String(50), nullable=True)
     email = Column(String(255), nullable=True)
     import_incomplete = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     user = relationship("User", backref="patient_profile")
     visits = relationship("Visit", back_populates="patient", cascade="all, delete-orphan")

@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class VisitBase(BaseModel):
@@ -40,8 +40,7 @@ class DoctorBrief(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class VisitResponse(VisitBase):
@@ -51,5 +50,4 @@ class VisitResponse(VisitBase):
     updated_at: datetime
     doctor: Optional[DoctorBrief] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

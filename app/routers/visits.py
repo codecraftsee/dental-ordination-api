@@ -1,12 +1,12 @@
 from typing import Annotated, List, Optional
 from datetime import date
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, status, Query
 from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.models.user import User
 from app.models.visit import Visit
 from app.schemas.visit import VisitCreate, VisitUpdate, VisitResponse
-from app.dependencies import require_permission
+from app.dependencies import apply_update, get_or_404, require_permission
 from app.permissions import Permission
 
 router = APIRouter(prefix="/api/visits", tags=["visits"])
@@ -61,13 +61,7 @@ def get_visit(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.VISITS_READ))]
 ):
-    visit = db.query(Visit).filter(Visit.id == visit_id).first()
-    if not visit:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Visit not found"
-        )
-    return visit
+    return get_or_404(db, Visit, visit_id, "Visit")
 
 
 @router.put("/{visit_id}", response_model=VisitResponse)
@@ -77,17 +71,8 @@ def update_visit(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))]
 ):
-    visit = db.query(Visit).filter(Visit.id == visit_id).first()
-    if not visit:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Visit not found"
-        )
-
-    update_data = visit_data.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(visit, key, value)
-
+    visit = get_or_404(db, Visit, visit_id, "Visit")
+    apply_update(visit, visit_data.model_dump(exclude_unset=True))
     db.commit()
     db.refresh(visit)
     return visit
@@ -99,12 +84,7 @@ def dismiss_import_warning(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))]
 ):
-    visit = db.query(Visit).filter(Visit.id == visit_id).first()
-    if not visit:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Visit not found"
-        )
+    visit = get_or_404(db, Visit, visit_id, "Visit")
     visit.import_incomplete = False
     db.commit()
     db.refresh(visit)
@@ -117,11 +97,6 @@ def delete_visit(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.VISITS_DELETE))]
 ):
-    visit = db.query(Visit).filter(Visit.id == visit_id).first()
-    if not visit:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Visit not found"
-        )
+    visit = get_or_404(db, Visit, visit_id, "Visit")
     db.delete(visit)
     db.commit()
