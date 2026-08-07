@@ -76,11 +76,15 @@ app.include_router(patient_documents.router)
 
 
 def run_startup_migrations():
-    """Create tables, apply the hand-rolled migrations, then seed defaults."""
+    """Create tables, apply the hand-rolled migrations, then seed defaults.
+
+    PostgreSQL only — see the note in CLAUDE.md. These are one-off migrations
+    that have already run everywhere; they are kept because nothing has
+    replaced them yet (alembic is a dependency but is not set up).
+    """
     Base.metadata.create_all(bind=engine)
 
     insp = inspect(engine)
-    is_postgres = engine.dialect.name == "postgresql"
 
     # Users table migrations
     if "users" in insp.get_table_names():
@@ -92,44 +96,10 @@ def run_startup_migrations():
                     "ALTER TABLE users ADD COLUMN must_set_password BOOLEAN NOT NULL DEFAULT FALSE"
                 ))
 
-        if is_postgres:
-            with engine.begin() as conn:
-                conn.execute(sqlalchemy.text(
-                    "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"
-                ))
-        else:
-            # SQLite: check if password_hash still has NOT NULL and recreate the table if so
-            with engine.begin() as conn:
-                result = conn.execute(sqlalchemy.text("PRAGMA table_info(users)"))
-                for row in result.fetchall():
-                    if row[1] == "password_hash" and row[3] == 1:  # notnull == 1
-                        conn.execute(sqlalchemy.text("""
-                            CREATE TABLE users_new (
-                                id VARCHAR(36) PRIMARY KEY,
-                                email VARCHAR(255) UNIQUE NOT NULL,
-                                password_hash VARCHAR(255),
-                                role VARCHAR(20) NOT NULL,
-                                is_active BOOLEAN DEFAULT 1,
-                                must_set_password BOOLEAN NOT NULL DEFAULT 0,
-                                first_name VARCHAR(100),
-                                last_name VARCHAR(100),
-                                phone VARCHAR(50),
-                                specialization VARCHAR(50),
-                                license_number VARCHAR(100),
-                                created_at DATETIME,
-                                updated_at DATETIME
-                            )
-                        """))
-                        conn.execute(sqlalchemy.text("""
-                            INSERT INTO users_new SELECT
-                                id, email, password_hash, role, is_active, must_set_password,
-                                first_name, last_name, phone, specialization, license_number,
-                                created_at, updated_at
-                            FROM users
-                        """))
-                        conn.execute(sqlalchemy.text("DROP TABLE users"))
-                        conn.execute(sqlalchemy.text("ALTER TABLE users_new RENAME TO users"))
-                        break
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text(
+                "ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"
+            ))
 
         # Add profile columns directly to users (replacing staff_profiles table)
         for col_def in [
@@ -145,8 +115,8 @@ def run_startup_migrations():
                         f"ALTER TABLE users ADD COLUMN {col_def[0]} {col_def[1]}"
                     ))
 
-    # Migrate data from staff_profiles into users, then drop the table (PostgreSQL only)
-    if is_postgres and "staff_profiles" in insp.get_table_names():
+    # Migrate data from staff_profiles into users, then drop the table
+    if "staff_profiles" in insp.get_table_names():
         with engine.begin() as conn:
             conn.execute(sqlalchemy.text("""
                 UPDATE users u
@@ -180,12 +150,12 @@ def run_startup_migrations():
                         f"ALTER TABLE {table_name} "
                         f"ADD COLUMN import_incomplete BOOLEAN NOT NULL DEFAULT FALSE"
                     ))
-            if is_postgres and "import_status" in columns:
+            if "import_status" in columns:
                 with engine.begin() as conn:
                     conn.execute(sqlalchemy.text(
                         f"ALTER TABLE {table_name} DROP COLUMN import_status"
                     ))
-            if is_postgres and "import_warnings" in columns:
+            if "import_warnings" in columns:
                 with engine.begin() as conn:
                     conn.execute(sqlalchemy.text(
                         f"ALTER TABLE {table_name} DROP COLUMN import_warnings"
@@ -193,46 +163,30 @@ def run_startup_migrations():
 
     # Migrate visits.doctor_id FK from doctors table to users table, then drop doctors
     if "doctors" in insp.get_table_names():
-        dialect = engine.dialect.name
         with engine.begin() as conn:
-            if dialect == "postgresql":
-                conn.execute(sqlalchemy.text(
-                    "ALTER TABLE visits DROP CONSTRAINT IF EXISTS visits_doctor_id_fkey"
-                ))
-                conn.execute(sqlalchemy.text(
-                    "ALTER TABLE visits ADD CONSTRAINT visits_doctor_id_fkey "
-                    "FOREIGN KEY (doctor_id) REFERENCES users(id)"
-                ))
-            else:
-                # SQLite doesn't support ALTER TABLE DROP CONSTRAINT;
-                # the FK is only enforced if PRAGMA foreign_keys=ON, which
-                # SQLAlchemy leaves OFF by default — so just skip for SQLite.
-                pass
+            conn.execute(sqlalchemy.text(
+                "ALTER TABLE visits DROP CONSTRAINT IF EXISTS visits_doctor_id_fkey"
+            ))
+            conn.execute(sqlalchemy.text(
+                "ALTER TABLE visits ADD CONSTRAINT visits_doctor_id_fkey "
+                "FOREIGN KEY (doctor_id) REFERENCES users(id)"
+            ))
             conn.execute(sqlalchemy.text("DROP TABLE doctors"))
 
-    # Migrate role enum values from lowercase to UPPERCASE
+    # Migrate role enum values from lowercase to UPPERCASE.
+    # PostgreSQL uses a native enum type, so the labels are renamed in place.
     if "users" in insp.get_table_names():
-        dialect = engine.dialect.name
-        if dialect == "postgresql":
-            # PostgreSQL uses a native enum type — rename values in place
-            with engine.begin() as conn:
-                for old, new in [("admin", "ADMIN"), ("doctor", "DOCTOR"), ("nurse", "NURSE")]:
-                    # Check if the old value still exists before renaming
-                    result = conn.execute(sqlalchemy.text(
-                        "SELECT 1 FROM pg_enum WHERE enumlabel = :old "
-                        "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'userrole')"
-                    ), {"old": old})
-                    if result.fetchone():
-                        conn.execute(sqlalchemy.text(
-                            f"ALTER TYPE userrole RENAME VALUE '{old}' TO '{new}'"
-                        ))
-        else:
-            # SQLite / others store enums as plain strings
-            with engine.begin() as conn:
-                for old, new in [("admin", "ADMIN"), ("doctor", "DOCTOR"), ("nurse", "NURSE")]:
+        with engine.begin() as conn:
+            for old, new in [("admin", "ADMIN"), ("doctor", "DOCTOR"), ("nurse", "NURSE")]:
+                # Check if the old value still exists before renaming
+                result = conn.execute(sqlalchemy.text(
+                    "SELECT 1 FROM pg_enum WHERE enumlabel = :old "
+                    "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'userrole')"
+                ), {"old": old})
+                if result.fetchone():
                     conn.execute(sqlalchemy.text(
-                        "UPDATE users SET role = :new WHERE role = :old"
-                    ), {"new": new, "old": old})
+                        f"ALTER TYPE userrole RENAME VALUE '{old}' TO '{new}'"
+                    ))
 
     # Seed default admin user
     with Session(engine) as db:
