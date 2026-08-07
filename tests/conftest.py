@@ -97,29 +97,43 @@ def client(engine):
         yield test_client
 
 
+SEEDED_TABLES = ("users", "diagnoses", "treatments")
+
+
 @pytest.fixture(scope="session")
-def seeded_ids(client, engine):
-    """Rows created by the startup seed, which cleanup must preserve."""
+def seeded_rows(client, engine):
+    """Full snapshot of every row the startup seed created."""
     with engine.connect() as conn:
         return {
-            table: {row[0] for row in conn.execute(text(f"SELECT id FROM {table}"))}
-            for table in ("users", "diagnoses", "treatments")
+            table: [
+                dict(row)
+                for row in conn.execute(text(f"SELECT * FROM {table}")).mappings()
+            ]
+            for table in SEEDED_TABLES
         }
 
 
 @pytest.fixture(autouse=True)
-def reset_db(client, engine, seeded_ids):
-    """Return the database to its just-seeded state after every test."""
+def reset_db(client, engine, seeded_rows):
+    """Return the database to its exact just-seeded state after every test.
+
+    Deleting only the *extra* rows is not enough: a test that changes a seeded
+    row (demoting the seeded admin, say) would leak that change into every test
+    that ran afterwards. So the seeded tables are emptied and rewritten from the
+    snapshot.
+    """
     yield
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE patient_documents, visits, patients CASCADE"))
-        for table, keep in seeded_ids.items():
-            conn.execute(
-                text(f"DELETE FROM {table} WHERE id NOT IN :ids").bindparams(
-                    bindparam("ids", expanding=True)
-                ),
-                {"ids": list(keep)},
-            )
+        for table in SEEDED_TABLES:
+            conn.execute(text(f"DELETE FROM {table}"))
+            for row in seeded_rows[table]:
+                columns = ", ".join(row)
+                placeholders = ", ".join(f":{name}" for name in row)
+                conn.execute(
+                    text(f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"),
+                    row,
+                )
 
 
 @pytest.fixture

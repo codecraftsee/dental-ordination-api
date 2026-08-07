@@ -86,6 +86,84 @@ def test_failed_patient_delete_does_not_leak_db_errors(
     assert "violates" not in resp.text
 
 
+class TestAdminLockout:
+    """Nobody should be able to leave the system with no active admin.
+
+    Deleting a user is a soft delete, and the startup seed only recreates
+    admin@dentalclinic.com when the row is absent — so a lockout would need
+    direct database access to undo.
+    """
+
+    def test_an_admin_cannot_delete_their_own_account(self, client, admin_token):
+        me = client.get("/api/auth/me", headers=auth(admin_token)).json()
+
+        resp = client.delete(f"/api/users/{me['id']}", headers=auth(admin_token))
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "You cannot deactivate your own account"
+        assert client.get("/api/auth/me", headers=auth(admin_token)).status_code == 200
+
+    def test_an_admin_cannot_deactivate_themselves_via_update(
+        self, client, admin_token
+    ):
+        me = client.get("/api/auth/me", headers=auth(admin_token)).json()
+
+        resp = client.put(
+            f"/api/users/{me['id']}",
+            json={"is_active": False},
+            headers=auth(admin_token),
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "You cannot deactivate your own account"
+
+    def test_the_only_admin_cannot_demote_themselves(self, client, admin_token):
+        """The reachable lockout: role change on the sole admin."""
+        me = client.get("/api/auth/me", headers=auth(admin_token)).json()
+
+        resp = client.put(
+            f"/api/users/{me['id']}", json={"role": "NURSE"}, headers=auth(admin_token)
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Cannot remove the last active admin"
+        assert (
+            client.get("/api/auth/me", headers=auth(admin_token)).json()["role"]
+            == "ADMIN"
+        )
+
+    def test_an_admin_can_demote_themselves_once_another_admin_exists(
+        self, client, admin_token, make_user
+    ):
+        """The guard must not be broader than the problem it solves."""
+        from app.models.user import UserRole
+
+        make_user(role=UserRole.ADMIN)
+        me = client.get("/api/auth/me", headers=auth(admin_token)).json()
+
+        resp = client.put(
+            f"/api/users/{me['id']}", json={"role": "NURSE"}, headers=auth(admin_token)
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "NURSE"
+
+    def test_a_second_admin_can_still_be_deleted(
+        self, client, admin_token, make_user
+    ):
+        from app.models.user import UserRole
+
+        other = make_user(role=UserRole.ADMIN)
+
+        resp = client.delete(f"/api/users/{other.id}", headers=auth(admin_token))
+
+        assert resp.status_code == 204
+
+    def test_deleting_a_non_admin_is_unaffected(self, client, admin_token, nurse):
+        resp = client.delete(f"/api/users/{nurse.id}", headers=auth(admin_token))
+        assert resp.status_code == 204
+
+
 def test_storage_reports_a_missing_signed_url_clearly(monkeypatch):
     """A Supabase error response used to surface as a bare KeyError."""
     from app.services import storage

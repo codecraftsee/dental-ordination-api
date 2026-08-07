@@ -16,6 +16,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
+def _assert_not_last_active_admin(db: Session, user: User) -> None:
+    """Refuse a change that would leave nobody able to administer the system.
+
+    Deleting a user is a soft delete, and the startup seed only recreates
+    admin@dentalclinic.com when no row with that email exists — so losing the
+    last admin is not self-healing. Recovery would need direct database access.
+    """
+    if user.role != UserRole.ADMIN or not user.is_active:
+        return
+    other_admins = (
+        db.query(User)
+        .filter(
+            User.role == UserRole.ADMIN,
+            User.is_active == True,  # noqa: E712 — SQL comparison, not a Python bool test
+            User.id != user.id,
+        )
+        .count()
+    )
+    if other_admins == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot remove the last active admin",
+        )
+
+
 @router.get("", response_model=List[UserResponse])
 def list_users(
     db: Annotated[Session, Depends(get_db)],
@@ -98,7 +123,7 @@ def update_user(
     user_id: str,
     data: UserUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))]
 ):
     user = get_or_404(db, User, user_id, "User")
 
@@ -107,6 +132,17 @@ def update_user(
     if "email" in update:
         if db.query(User).filter(User.email == update["email"], User.id != user_id).first():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
+
+    deactivating = update.get("is_active") is False
+    demoting = "role" in update and update["role"] != UserRole.ADMIN
+
+    if deactivating and user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account",
+        )
+    if deactivating or demoting:
+        _assert_not_last_active_admin(db, user)
 
     apply_update(user, update)
     db.commit()
@@ -118,8 +154,14 @@ def update_user(
 def delete_user(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))]
 ):
     user = get_or_404(db, User, user_id, "User")
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account",
+        )
+    _assert_not_last_active_admin(db, user)
     user.is_active = False
     db.commit()
