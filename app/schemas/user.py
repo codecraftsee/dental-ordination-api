@@ -35,7 +35,13 @@ class UserResponse(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     phone: Optional[str] = None
-    specialization: Optional[Specialization] = None
+    # Deliberately `str`, not the Specialization enum, even though UserCreate and
+    # UserUpdate validate against the enum. The column is a plain VARCHAR, and a
+    # value outside the enum — the staff_profiles migration copied arbitrary text
+    # into it — made response validation fail, which 500s the *entire* user list
+    # rather than the one bad row. Input stays strict; output reports what is
+    # actually stored.
+    specialization: Optional[str] = None
     license_number: Optional[str] = None
     permissions: List[str] = []
     created_at: datetime

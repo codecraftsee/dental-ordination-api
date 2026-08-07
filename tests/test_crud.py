@@ -502,6 +502,60 @@ class TestAdminBulkDelete:
         assert resp.json() == {"deleted": seeded}
         assert client.get("/api/treatments", headers=headers).json() == []
 
+    def _visit_referencing_catalogue(self, client, headers, patient, doctor):
+        diagnosis = client.get("/api/diagnoses", headers=headers).json()[0]
+        treatment = client.get("/api/treatments", headers=headers).json()[0]
+        return client.post(
+            "/api/visits",
+            json={
+                "patient_id": patient["id"],
+                "doctor_id": doctor.id,
+                "date": "2024-03-01",
+                "diagnosis_id": diagnosis["id"],
+                "treatment_id": treatment["id"],
+                "diagnosis_notes": "Caries d.16",
+            },
+            headers=headers,
+        ).json()
+
+    def test_deleting_diagnoses_unlinks_visits_instead_of_failing(
+        self, client, admin_token, patient, doctor
+    ):
+        """visits.diagnosis_id is a FK; this used to 500 on any real database."""
+        headers = auth(admin_token)
+        visit = self._visit_referencing_catalogue(client, headers, patient, doctor)
+
+        resp = client.delete("/api/admin/diagnoses", headers=headers)
+        assert resp.status_code == 200
+
+        after = client.get(f"/api/visits/{visit['id']}", headers=headers).json()
+        assert after["diagnosis_id"] is None
+        # The visit itself and its clinical notes survive.
+        assert after["diagnosis_notes"] == "Caries d.16"
+
+    def test_deleting_treatments_unlinks_visits_instead_of_failing(
+        self, client, admin_token, patient, doctor
+    ):
+        headers = auth(admin_token)
+        visit = self._visit_referencing_catalogue(client, headers, patient, doctor)
+
+        resp = client.delete("/api/admin/treatments", headers=headers)
+        assert resp.status_code == 200
+
+        after = client.get(f"/api/visits/{visit['id']}", headers=headers).json()
+        assert after["treatment_id"] is None
+        assert after["diagnosis_notes"] == "Caries d.16"
+
+    def test_delete_all_still_works_with_linked_visits(
+        self, client, admin_token, patient, doctor
+    ):
+        headers = auth(admin_token)
+        self._visit_referencing_catalogue(client, headers, patient, doctor)
+
+        resp = client.delete("/api/admin/all", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["visits"] == 1
+
     def test_delete_all_returns_a_count_per_resource(
         self, client, admin_token, patient, doctor
     ):

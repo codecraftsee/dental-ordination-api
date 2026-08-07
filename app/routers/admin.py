@@ -43,6 +43,11 @@ def delete_all_diagnoses(
     db: Annotated[Session, Depends(get_db)],
     _: BulkDeleteAuth,
 ):
+    # visits.diagnosis_id is a nullable FK: clear the link rather than deleting
+    # the visits. Without this the delete violates the constraint and 500s as
+    # soon as any visit references a diagnosis. The clinical record lives in
+    # visits.diagnosis_notes, which is untouched.
+    db.query(Visit).update({Visit.diagnosis_id: None}, synchronize_session=False)
     count = db.query(Diagnosis).delete(synchronize_session=False)
     db.commit()
     return {"deleted": count}
@@ -53,6 +58,8 @@ def delete_all_treatments(
     db: Annotated[Session, Depends(get_db)],
     _: BulkDeleteAuth,
 ):
+    # Same as above: unlink rather than cascade into the visit history.
+    db.query(Visit).update({Visit.treatment_id: None}, synchronize_session=False)
     count = db.query(Treatment).delete(synchronize_session=False)
     db.commit()
     return {"deleted": count}

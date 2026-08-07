@@ -164,6 +164,56 @@ class TestAdminLockout:
         assert resp.status_code == 204
 
 
+class TestSpecializationIsNotEnumBound:
+    """users.specialization is a VARCHAR, so the response must not enum-validate it.
+
+    The staff_profiles migration copied arbitrary text into that column. When
+    UserResponse typed the field as the Specialization enum, one stray value
+    failed response validation and took down the whole user list.
+    """
+
+    @staticmethod
+    def _user_with(specialization, make_user):
+        from app.models.user import UserRole
+
+        return make_user(role=UserRole.DOCTOR, specialization=specialization)
+
+    def test_an_unknown_specialization_does_not_break_the_list(
+        self, client, admin_token, make_user
+    ):
+        self._user_with("Implantology", make_user)
+
+        resp = client.get("/api/users", headers=auth(admin_token))
+
+        assert resp.status_code == 200
+        assert "Implantology" in [u["specialization"] for u in resp.json()]
+
+    def test_an_unknown_specialization_does_not_break_the_detail_view(
+        self, client, admin_token, make_user
+    ):
+        user = self._user_with("Implantology", make_user)
+
+        resp = client.get(f"/api/users/{user.id}", headers=auth(admin_token))
+
+        assert resp.status_code == 200
+        assert resp.json()["specialization"] == "Implantology"
+
+    def test_input_validation_is_still_strict(self, client, admin_token):
+        """Widening the response must not let new bad values in."""
+        resp = client.post(
+            "/api/users",
+            json={
+                "email": "bad-spec@dental-test.com",
+                "first_name": "Bad",
+                "last_name": "Spec",
+                "role": "DOCTOR",
+                "specialization": "Implantology",
+            },
+            headers=auth(admin_token),
+        )
+        assert resp.status_code == 422
+
+
 def test_storage_reports_a_missing_signed_url_clearly(monkeypatch):
     """A Supabase error response used to surface as a bare KeyError."""
     from app.services import storage
