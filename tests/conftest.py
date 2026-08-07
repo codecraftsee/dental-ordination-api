@@ -160,9 +160,10 @@ def make_user(client):
                 # Not a .local/.test/.example domain: EmailStr rejects reserved
                 # TLDs, so POST /api/users would 422 before its own validation.
                 email=kwargs.pop("email", f"{role.value.lower()}{counter['n']}@dental-test.com"),
-                password_hash=get_password_hash(password),
+                # password=None models an invited user who has not set one yet
+                password_hash=get_password_hash(password) if password else None,
                 role=role,
-                must_set_password=False,
+                must_set_password=kwargs.pop("must_set_password", False),
                 first_name=kwargs.pop("first_name", role.value.title()),
                 last_name=kwargs.pop("last_name", "Tester"),
                 **kwargs,

@@ -275,6 +275,265 @@ def test_deleting_a_user_is_a_soft_delete(client, admin_token, nurse):
     assert nurse.id not in [u["id"] for u in listed]
 
 
+class TestUserInvites:
+    """POST /api/users and resend-invite, with the Resend call stubbed out.
+
+    A created user has no password: they receive a signed link and set one via
+    /api/auth/set-password.
+    """
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        from app.routers import users as users_router
+
+        captured = []
+        monkeypatch.setattr(
+            users_router,
+            "send_invite_email",
+            lambda to, name, url: captured.append((to, name, url)),
+        )
+        return captured
+
+    def test_creating_a_user_sends_an_invite_link(self, client, admin_token, sent):
+        resp = client.post(
+            "/api/users",
+            json={
+                "email": "newdoc@dental-test.com",
+                "first_name": "New",
+                "last_name": "Doc",
+                "role": "DOCTOR",
+            },
+            headers=auth(admin_token),
+        )
+
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["must_set_password"] is True
+        assert body["permissions"] == []
+
+        assert len(sent) == 1
+        to, name, url = sent[0]
+        assert to == "newdoc@dental-test.com"
+        assert name == "New"
+        assert "/set-password?token=" in url
+
+    def test_a_created_user_cannot_log_in_until_they_set_a_password(
+        self, client, admin_token, sent
+    ):
+        client.post(
+            "/api/users",
+            json={
+                "email": "nopass@dental-test.com",
+                "first_name": "No",
+                "last_name": "Pass",
+            },
+            headers=auth(admin_token),
+        )
+
+        resp = client.post(
+            "/api/auth/login",
+            data={"username": "nopass@dental-test.com", "password": "anything"},
+        )
+        assert resp.status_code == 401
+
+    def test_a_failing_email_does_not_fail_the_request(
+        self, client, admin_token, monkeypatch
+    ):
+        """The user is still created; the invite link can be handed over manually."""
+        from app.routers import users as users_router
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("Resend is down")
+
+        monkeypatch.setattr(users_router, "send_invite_email", boom)
+
+        resp = client.post(
+            "/api/users",
+            json={
+                "email": "resilient@dental-test.com",
+                "first_name": "Still",
+                "last_name": "Created",
+            },
+            headers=auth(admin_token),
+        )
+        assert resp.status_code == 201
+
+    def test_resend_invite(self, client, admin_token, sent):
+        created = client.post(
+            "/api/users",
+            json={
+                "email": "again@dental-test.com",
+                "first_name": "Again",
+                "last_name": "User",
+            },
+            headers=auth(admin_token),
+        ).json()
+        sent.clear()
+
+        resp = client.post(
+            f"/api/users/{created['id']}/resend-invite", headers=auth(admin_token)
+        )
+
+        assert resp.status_code == 204
+        assert len(sent) == 1
+
+    def test_resend_invite_for_an_unknown_user_is_404(self, client, admin_token, sent):
+        resp = client.post(
+            f"/api/users/{MISSING_ID}/resend-invite", headers=auth(admin_token)
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "User not found"
+
+    def test_resend_invite_after_the_password_is_set_is_400(
+        self, client, admin_token, nurse, sent
+    ):
+        resp = client.post(
+            f"/api/users/{nurse.id}/resend-invite", headers=auth(admin_token)
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "User has already set their password"
+
+
+class TestExplicitNulls:
+    """A field sent as `null` must be a 400, not a 500.
+
+    model_dump(exclude_unset=True) keeps explicit nulls, so these used to reach
+    the database and fail a NOT NULL constraint.
+    """
+
+    def test_nulling_a_required_user_field_is_400(self, client, admin_token, nurse):
+        resp = client.put(
+            f"/api/users/{nurse.id}", json={"role": None}, headers=auth(admin_token)
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Field 'role' cannot be null"
+
+    def test_nulling_a_required_patient_field_is_400(
+        self, client, admin_token, patient
+    ):
+        resp = client.put(
+            f"/api/patients/{patient['id']}",
+            json={"first_name": None},
+            headers=auth(admin_token),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Field 'first_name' cannot be null"
+
+    def test_nulling_a_required_visit_field_is_400(
+        self, client, admin_token, patient, doctor
+    ):
+        visit = client.post(
+            "/api/visits",
+            json={"patient_id": patient["id"], "doctor_id": doctor.id, "date": "2024-03-01"},
+            headers=auth(admin_token),
+        ).json()
+
+        resp = client.put(
+            f"/api/visits/{visit['id']}", json={"date": None}, headers=auth(admin_token)
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Field 'date' cannot be null"
+
+    def test_nulling_an_optional_field_still_works(self, client, admin_token, patient):
+        """The guard must only fire on columns that are actually NOT NULL."""
+        resp = client.put(
+            f"/api/patients/{patient['id']}",
+            json={"phone": None},
+            headers=auth(admin_token),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["phone"] is None
+
+    def test_a_rejected_update_leaves_the_row_untouched(
+        self, client, admin_token, patient
+    ):
+        """Validation happens before any field is applied."""
+        resp = client.put(
+            f"/api/patients/{patient['id']}",
+            json={"city": "Kragujevac", "first_name": None},
+            headers=auth(admin_token),
+        )
+        assert resp.status_code == 400
+
+        after = client.get(
+            f"/api/patients/{patient['id']}", headers=auth(admin_token)
+        ).json()
+        assert after["city"] == "Novi Sad"
+        assert after["first_name"] == "Ana"
+
+
+class TestAdminBulkDelete:
+    def test_delete_all_patients_takes_their_visits_too(
+        self, client, admin_token, patient, doctor
+    ):
+        headers = auth(admin_token)
+        client.post(
+            "/api/visits",
+            json={"patient_id": patient["id"], "doctor_id": doctor.id, "date": "2024-03-01"},
+            headers=headers,
+        )
+
+        resp = client.delete("/api/admin/patients", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": 1}
+        assert client.get("/api/patients", headers=headers).json() == []
+        assert client.get("/api/visits", headers=headers).json() == []
+
+    def test_delete_all_diagnoses(self, client, admin_token):
+        headers = auth(admin_token)
+        seeded = len(client.get("/api/diagnoses", headers=headers).json())
+        assert seeded == 6
+
+        resp = client.delete("/api/admin/diagnoses", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": seeded}
+        assert client.get("/api/diagnoses", headers=headers).json() == []
+
+    def test_delete_all_treatments(self, client, admin_token):
+        headers = auth(admin_token)
+        seeded = len(client.get("/api/treatments", headers=headers).json())
+        assert seeded == 6
+
+        resp = client.delete("/api/admin/treatments", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": seeded}
+        assert client.get("/api/treatments", headers=headers).json() == []
+
+    def test_delete_all_returns_a_count_per_resource(
+        self, client, admin_token, patient, doctor
+    ):
+        headers = auth(admin_token)
+        client.post(
+            "/api/visits",
+            json={"patient_id": patient["id"], "doctor_id": doctor.id, "date": "2024-03-01"},
+            headers=headers,
+        )
+
+        resp = client.delete("/api/admin/all", headers=headers)
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "visits": 1,
+            "patients": 1,
+            "diagnoses": 6,
+            "treatments": 6,
+        }
+        for path in ("/api/visits", "/api/patients", "/api/diagnoses", "/api/treatments"):
+            assert client.get(path, headers=headers).json() == [], path
+
+    def test_bulk_delete_leaves_users_alone(self, client, admin_token, doctor):
+        """Doctors are users; wiping data must not remove the people."""
+        headers = auth(admin_token)
+
+        client.delete("/api/admin/all", headers=headers)
+
+        users = client.get("/api/users", headers=headers).json()
+        assert doctor.id in [u["id"] for u in users]
+
+
 def test_admin_bulk_delete_clears_visits_only(client, admin_token, patient, doctor):
     headers = auth(admin_token)
     client.post(

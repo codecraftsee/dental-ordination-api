@@ -143,6 +143,153 @@ def test_change_password_then_login_with_the_new_one(client, make_user):
     assert failed.status_code == 401
 
 
+class TestSetPassword:
+    """The invite-acceptance flow: POST /api/auth/set-password.
+
+    A user created through POST /api/users has no password at all — they set
+    one from an emailed link carrying a signed `set_password` token.
+    """
+
+    @staticmethod
+    def _invited(make_user):
+        from app.models.user import UserRole
+
+        return make_user(role=UserRole.NURSE, password=None, must_set_password=True)
+
+    @staticmethod
+    def _token(user_id):
+        from app.services.auth import create_invite_token
+
+        return create_invite_token(user_id)
+
+    def test_an_invited_user_sets_their_password_and_gets_tokens(
+        self, client, make_user
+    ):
+        user = self._invited(make_user)
+
+        resp = client.post(
+            "/api/auth/set-password",
+            json={
+                "token": self._token(user.id),
+                "password": "BrandNew123#",
+                "password_confirm": "BrandNew123#",
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["access_token"]
+        assert resp.json()["refresh_token"]
+        # And the new password actually works.
+        assert login(client, user.email, "BrandNew123#")
+
+    def test_mismatched_passwords_are_rejected(self, client, make_user):
+        user = self._invited(make_user)
+
+        resp = client.post(
+            "/api/auth/set-password",
+            json={
+                "token": self._token(user.id),
+                "password": "BrandNew123#",
+                "password_confirm": "Different123#",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Passwords do not match"
+
+    def test_a_garbage_token_is_rejected(self, client):
+        resp = client.post(
+            "/api/auth/set-password",
+            json={
+                "token": "not-a-jwt",
+                "password": "BrandNew123#",
+                "password_confirm": "BrandNew123#",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Invalid or expired invite link"
+
+    def test_an_access_token_is_not_an_invite_token(self, client, admin_token):
+        """Only tokens carrying type=set_password may be used here."""
+        resp = client.post(
+            "/api/auth/set-password",
+            json={
+                "token": admin_token,
+                "password": "BrandNew123#",
+                "password_confirm": "BrandNew123#",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Invalid invite link"
+
+    def test_a_token_for_a_deleted_user_is_404(self, client):
+        resp = client.post(
+            "/api/auth/set-password",
+            json={
+                "token": self._token("00000000-0000-0000-0000-000000000000"),
+                "password": "BrandNew123#",
+                "password_confirm": "BrandNew123#",
+            },
+        )
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "User not found"
+
+    def test_the_link_cannot_be_reused_once_the_password_is_set(
+        self, client, make_user
+    ):
+        user = self._invited(make_user)
+        token = self._token(user.id)
+        payload = {
+            "token": token,
+            "password": "BrandNew123#",
+            "password_confirm": "BrandNew123#",
+        }
+
+        assert client.post("/api/auth/set-password", json=payload).status_code == 200
+
+        again = client.post("/api/auth/set-password", json=payload)
+        assert again.status_code == 400
+        assert (
+            again.json()["detail"]
+            == "Password has already been set. Use change-password instead."
+        )
+
+    def test_a_disabled_user_cannot_set_a_password(self, client, make_user):
+        from app.models.user import UserRole
+
+        user = make_user(
+            role=UserRole.NURSE,
+            password=None,
+            must_set_password=True,
+            is_active=False,
+        )
+
+        resp = client.post(
+            "/api/auth/set-password",
+            json={
+                "token": self._token(user.id),
+                "password": "BrandNew123#",
+                "password_confirm": "BrandNew123#",
+            },
+        )
+
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "User account is disabled"
+
+    def test_a_short_password_is_rejected_by_validation(self, client, make_user):
+        user = self._invited(make_user)
+
+        resp = client.post(
+            "/api/auth/set-password",
+            json={"token": self._token(user.id), "password": "abc", "password_confirm": "abc"},
+        )
+
+        assert resp.status_code == 422
+
+
 def test_health_reports_the_environment(client):
     resp = client.get("/health")
     assert resp.status_code == 200

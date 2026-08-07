@@ -28,7 +28,25 @@ def get_or_404(db: Session, model: type[ModelT], obj_id: str, name: str) -> Mode
 
 
 def apply_update(obj: Any, changes: dict) -> None:
-    """Copy the explicitly-set fields of a Pydantic update model onto a row."""
+    """Copy the explicitly-set fields of a Pydantic update model onto a row.
+
+    `model_dump(exclude_unset=True)` keeps a field the client explicitly sent as
+    null, so writing it straight through puts NULL into a NOT NULL column and
+    surfaces as a 500. Reject it as a 400 naming the offending field instead.
+
+    Fields are all validated before any are applied, so a rejected request never
+    leaves the row half-updated.
+    """
+    columns = type(obj).__table__.columns
+    for field, value in changes.items():
+        if value is None:
+            column = columns.get(field)
+            if column is not None and not column.nullable:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Field '{field}' cannot be null",
+                )
+
     for field, value in changes.items():
         setattr(obj, field, value)
 
