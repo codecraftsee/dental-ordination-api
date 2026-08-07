@@ -32,44 +32,56 @@ docker compose -f docker-compose.test.yml down    # when finished
   `detail` strings so refactors can't silently change the API contract.
 
 ## User Roles
+`UserRole` has exactly three values. Permissions are defined in
+`app/permissions.py` and returned by `GET /api/auth/me` for the logged-in user.
+
 | Role | Description |
 |------|-------------|
-| `admin` | Full access, user management, all CRUD |
-| `doctor` | Manage patients, create/edit visits |
-| `assistant` | View patients, create visits under supervision |
-| `patient` | View own profile and visits only |
+| `ADMIN` | Everything: user management, bulk delete, XLSX import, all CRUD |
+| `DOCTOR` | Create/update patients, visits, diagnoses, treatments; full access to patient documents; read-only on users. **Cannot delete** patients, visits, diagnoses or treatments |
+| `NURSE` | Read-only on everything |
+
+There is no `assistant` or `patient` role — the docs used to claim otherwise.
+`nurse` is the assistant-equivalent role.
 
 ## API Endpoints
 
 ### Auth
 - `POST /api/auth/login` — login, returns tokens
 - `POST /api/auth/refresh` — refresh access token
-- `POST /api/auth/logout` — invalidate refresh token
-- `GET /api/auth/me` — current user
+- `POST /api/auth/set-password` — set initial password from an invite token
+- `PUT /api/auth/change-password` — change own password
+- `GET /api/auth/me` — current user, including their permission list
 
-### Users (Admin only)
+### Users (Admin only, except `GET` which any role may call)
 - `GET/POST /api/users`
-- `GET/PUT/DELETE /api/users/{id}`
+- `GET/PUT/DELETE /api/users/{id}` — `DELETE` is a **soft delete** (`is_active = False`)
+- `POST /api/users/{id}/resend-invite`
+
+Doctors are users with `role=DOCTOR`; there is no separate `/api/doctors`
+resource. The `doctors` table was merged into `users` and dropped.
 
 ### Patients
 - `GET/POST /api/patients`
 - `GET/PUT/DELETE /api/patients/{id}`
-- `GET /api/patients/{id}/dental-card`
+- `PATCH /api/patients/{id}/dismiss-warning` — clear `import_incomplete`
 
-### Doctors
-- `GET/POST /api/doctors`
-- `GET/PUT/DELETE /api/doctors/{id}`
+### Patient Documents
+- `GET/POST /api/patients/{id}/documents`
+- `GET/DELETE /api/patients/{id}/documents/{document_id}`
+- Files live in Supabase Storage; responses carry a short-lived `signed_url`
 
 ### Visits
 - `GET/POST /api/visits`
 - `GET/PUT/DELETE /api/visits/{id}`
+- `PATCH /api/visits/{id}/dismiss-warning` — clear `import_incomplete`
 
 ### Diagnoses & Treatments
 - `GET/POST /api/diagnoses`, `PUT/DELETE /api/diagnoses/{id}`
 - `GET/POST /api/treatments`, `PUT/DELETE /api/treatments/{id}`
 
 ### Admin Bulk Delete
-- `DELETE /api/admin/visits|patients|doctors|diagnoses|treatments|all`
+- `DELETE /api/admin/visits|patients|diagnoses|treatments|all`
 
 ### Import
 - `POST /api/import/xlsx` — import patient dental cards from XLSX files (admin only)
@@ -78,6 +90,19 @@ docker compose -f docker-compose.test.yml down    # when finished
   - Event types: `progress` (before each file), `file_done` (after each file), `complete` (final summary)
   - Frontend must consume via `fetch()` + `ReadableStream` (not `EventSource`, which is GET-only)
   - Each file is committed/rolled back independently; errors appear in the event payload, not as HTTP errors
+
+## Planned — not implemented
+Documented here so nobody assumes these already work.
+
+- **`POST /api/auth/logout`** — there is currently **no server-side logout and no
+  refresh-token revocation**. A refresh token stays valid for its full
+  `REFRESH_TOKEN_EXPIRE_DAYS` (7) even after the user "logs out"; the frontend
+  only discards it locally. Implementing this needs somewhere to record revoked
+  tokens (a `jti` claim plus a denylist table, or short-lived refresh tokens
+  rotated on every use).
+  - Deactivating a user *does* take effect immediately — `get_current_user`
+    checks `is_active` on every request — so disabling an account is the
+    current way to cut someone off.
 
 ## Key Files
 - `app/main.py` — app entry point, startup seeds admin + diagnoses + treatments
