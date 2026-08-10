@@ -56,9 +56,7 @@ def test_upload_then_list_and_fetch(client, admin_token, patient, fake_storage):
     assert body["signed_url"].startswith("https://storage.test/")
     assert len(fake_storage["uploaded"]) == 1
 
-    listed = client.get(
-        f"/api/patients/{patient['id']}/documents", headers=auth(admin_token)
-    )
+    listed = client.get(f"/api/patients/{patient['id']}/documents", headers=auth(admin_token))
     assert listed.status_code == 200
     assert [d["id"] for d in listed.json()] == [body["id"]]
 
@@ -70,9 +68,7 @@ def test_upload_then_list_and_fetch(client, admin_token, patient, fake_storage):
     assert fetched.json()["id"] == body["id"]
 
 
-def test_delete_removes_the_row_and_the_stored_object(
-    client, admin_token, patient, fake_storage
-):
+def test_delete_removes_the_row_and_the_stored_object(client, admin_token, patient, fake_storage):
     doc = _upload(client, admin_token, patient["id"]).json()
 
     resp = client.delete(
@@ -82,15 +78,11 @@ def test_delete_removes_the_row_and_the_stored_object(
     assert resp.status_code == 204
     assert len(fake_storage["deleted"]) == 1
 
-    listed = client.get(
-        f"/api/patients/{patient['id']}/documents", headers=auth(admin_token)
-    )
+    listed = client.get(f"/api/patients/{patient['id']}/documents", headers=auth(admin_token))
     assert listed.json() == []
 
 
-def test_missing_patient_is_404_with_the_patient_message(
-    client, admin_token, fake_storage
-):
+def test_missing_patient_is_404_with_the_patient_message(client, admin_token, fake_storage):
     missing = "00000000-0000-0000-0000-000000000000"
     resp = client.get(f"/api/patients/{missing}/documents", headers=auth(admin_token))
     assert resp.status_code == 404
@@ -133,9 +125,7 @@ def test_a_document_cannot_be_read_through_another_patient(
 
 
 def test_unsupported_content_type_is_415(client, admin_token, patient, fake_storage):
-    resp = _upload(
-        client, admin_token, patient["id"], name="notes.txt", mime="text/plain"
-    )
+    resp = _upload(client, admin_token, patient["id"], name="notes.txt", mime="text/plain")
     assert resp.status_code == 415
     assert "Unsupported file type" in resp.json()["detail"]
 
@@ -146,15 +136,11 @@ def test_empty_file_is_400(client, admin_token, patient, fake_storage):
     assert resp.json()["detail"] == "Uploaded file is empty"
 
 
-def test_nurse_cannot_upload_but_can_read(
-    client, nurse_token, admin_token, patient, fake_storage
-):
+def test_nurse_cannot_upload_but_can_read(client, nurse_token, admin_token, patient, fake_storage):
     assert _upload(client, nurse_token, patient["id"]).status_code == 403
 
     _upload(client, admin_token, patient["id"])
-    listed = client.get(
-        f"/api/patients/{patient['id']}/documents", headers=auth(nurse_token)
-    )
+    listed = client.get(f"/api/patients/{patient['id']}/documents", headers=auth(nurse_token))
     assert listed.status_code == 200
     assert len(listed.json()) == 1
 

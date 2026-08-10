@@ -75,9 +75,7 @@ def _events(response) -> list[dict]:
     ]
 
 
-def test_import_streams_progress_then_file_done_then_complete(
-    client, admin_token, doctor
-):
+def test_import_streams_progress_then_file_done_then_complete(client, admin_token, doctor):
     resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
 
     assert resp.status_code == 200
@@ -128,9 +126,7 @@ def test_import_persists_the_patient_and_visit(client, admin_token, doctor):
     assert visits[0]["import_incomplete"] is False
 
 
-def test_reimporting_the_same_file_skips_duplicate_visits(
-    client, admin_token, doctor
-):
+def test_reimporting_the_same_file_skips_duplicate_visits(client, admin_token, doctor):
     card = _dental_card([VISIT_ROW])
     _post(client, admin_token, card)
 
@@ -153,9 +149,7 @@ def test_a_row_without_a_price_is_flagged_incomplete(client, admin_token, doctor
     assert visits[0]["price"] is None
 
 
-def test_an_unreadable_gender_flags_the_patient_and_reports_it(
-    client, admin_token, doctor
-):
+def test_an_unreadable_gender_flags_the_patient_and_reports_it(client, admin_token, doctor):
     card = _dental_card([VISIT_ROW], gender="?")
     summary = _events(_post(client, admin_token, card))[-1]["summary"]
 
@@ -168,9 +162,7 @@ def test_an_unreadable_gender_flags_the_patient_and_reports_it(
     assert patients[0]["import_incomplete"] is True
 
 
-def test_a_missing_patient_name_reports_an_error_and_imports_nothing(
-    client, admin_token, doctor
-):
+def test_a_missing_patient_name_reports_an_error_and_imports_nothing(client, admin_token, doctor):
     card = _dental_card([VISIT_ROW], first_name="", last_name="")
     summary = _events(_post(client, admin_token, card))[-1]["summary"]
 
@@ -180,9 +172,7 @@ def test_a_missing_patient_name_reports_an_error_and_imports_nothing(
     assert client.get("/api/patients", headers=auth(admin_token)).json() == []
 
 
-def test_a_corrupt_file_fails_alone_without_killing_the_stream(
-    client, admin_token, doctor
-):
+def test_a_corrupt_file_fails_alone_without_killing_the_stream(client, admin_token, doctor):
     resp = client.post(
         "/api/import/xlsx",
         files=[
@@ -213,9 +203,7 @@ def test_a_corrupt_file_fails_alone_without_killing_the_stream(
     assert summary["patients_created"] == 1
 
 
-def test_doctor_id_form_field_overrides_row_initials(
-    client, admin_token, doctor, make_user
-):
+def test_doctor_id_form_field_overrides_row_initials(client, admin_token, doctor, make_user):
     from app.models.user import UserRole
 
     other = make_user(role=UserRole.DOCTOR, first_name="Zoran")
@@ -260,9 +248,7 @@ def test_rows_before_the_first_date_are_skipped(client, admin_token, doctor):
     assert visits[0]["date"] == "2024-04-05"
 
 
-def test_an_ambiguous_initial_falls_back_instead_of_guessing(
-    client, admin_token, make_user
-):
+def test_an_ambiguous_initial_falls_back_instead_of_guessing(client, admin_token, make_user):
     """Two doctors share the initial 'M', so it must not resolve to either by name."""
     from app.models.user import UserRole
 
@@ -277,9 +263,7 @@ def test_an_ambiguous_initial_falls_back_instead_of_guessing(
 
 def test_import_with_no_doctors_in_the_system_reports_it(client, admin_token):
     """No `doctor` fixture here: there is nobody to assign visits to."""
-    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1][
-        "summary"
-    ]
+    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1]["summary"]
 
     assert summary["patients_created"] == 1
     assert summary["visits_created"] == 0

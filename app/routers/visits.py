@@ -46,7 +46,7 @@ def list_visits(
 def create_visit(
     visit_data: VisitCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.VISITS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_CREATE))],
 ):
     visit = Visit(**visit_data.model_dump())
     db.add(visit)
@@ -59,7 +59,7 @@ def create_visit(
 def get_visit(
     visit_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.VISITS_READ))]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_READ))],
 ):
     return get_or_404(db, Visit, visit_id, "Visit")
 
@@ -69,7 +69,7 @@ def update_visit(
     visit_id: str,
     visit_data: VisitUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))],
 ):
     visit = get_or_404(db, Visit, visit_id, "Visit")
     apply_update(visit, visit_data.model_dump(exclude_unset=True))
@@ -82,7 +82,7 @@ def update_visit(
 def dismiss_import_warning(
     visit_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_UPDATE))],
 ):
     visit = get_or_404(db, Visit, visit_id, "Visit")
     visit.import_incomplete = False
@@ -95,7 +95,7 @@ def dismiss_import_warning(
 def delete_visit(
     visit_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.VISITS_DELETE))]
+    _: Annotated[User, Depends(require_permission(Permission.VISITS_DELETE))],
 ):
     visit = get_or_404(db, Visit, visit_id, "Visit")
     db.delete(visit)

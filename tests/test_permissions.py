@@ -24,9 +24,7 @@ def test_nurse_can_read_patients(client, nurse_token):
 
 
 def test_nurse_cannot_create_a_patient(client, nurse_token):
-    resp = client.post(
-        "/api/patients", json=PATIENT_PAYLOAD, headers=auth(nurse_token)
-    )
+    resp = client.post("/api/patients", json=PATIENT_PAYLOAD, headers=auth(nurse_token))
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Insufficient permissions"
 
@@ -37,9 +35,7 @@ def test_nurse_cannot_delete_a_patient(client, nurse_token, patient):
 
 
 def test_doctor_can_create_a_patient(client, doctor_token):
-    resp = client.post(
-        "/api/patients", json=PATIENT_PAYLOAD, headers=auth(doctor_token)
-    )
+    resp = client.post("/api/patients", json=PATIENT_PAYLOAD, headers=auth(doctor_token))
     assert resp.status_code == 201
 
 

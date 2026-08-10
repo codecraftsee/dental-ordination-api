@@ -59,10 +59,12 @@ def list_users(
 def create_user(
     data: UserCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))],
 ):
     if db.query(User).filter(User.email == data.email).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered"
+        )
 
     user = User(
         email=data.email,
@@ -93,11 +95,13 @@ def create_user(
 def resend_invite(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))],
 ):
     user = get_or_404(db, User, user_id, "User")
     if not user.must_set_password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User has already set their password")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="User has already set their password"
+        )
 
     settings = get_settings()
     token = create_invite_token(user.id)
@@ -113,7 +117,7 @@ def resend_invite(
 def get_user(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_READ))]
+    _: Annotated[User, Depends(require_permission(Permission.USERS_READ))],
 ):
     return to_user_response(get_or_404(db, User, user_id, "User"))
 
@@ -123,7 +127,7 @@ def update_user(
     user_id: str,
     data: UserUpdate,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))],
 ):
     user = get_or_404(db, User, user_id, "User")
 
@@ -131,7 +135,9 @@ def update_user(
 
     if "email" in update:
         if db.query(User).filter(User.email == update["email"], User.id != user_id).first():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use"
+            )
 
     deactivating = update.get("is_active") is False
     demoting = "role" in update and update["role"] != UserRole.ADMIN
@@ -154,7 +160,7 @@ def update_user(
 def delete_user(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))],
 ):
     user = get_or_404(db, User, user_id, "User")
     if user.id == current_user.id:

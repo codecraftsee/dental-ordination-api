@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/import", tags=["import"])
 
-TOOTH_REGEX = re.compile(r'd\.?\s?(\d+)', re.IGNORECASE)
+TOOTH_REGEX = re.compile(r"d\.?\s?(\d+)", re.IGNORECASE)
 
 # Layout of a dental card: patient details sit in column C (index 2) of rows
 # 3-11, and the visit table starts at row 15.
@@ -32,12 +32,11 @@ FIRST_VISIT_ROW = 14
 MIN_ROWS = 14
 
 
-
 def parse_date(value) -> date | None:
     """Parse 'dd.mm.yyyy.' format to date object."""
     if not value or not isinstance(value, str):
         return None
-    cleaned = value.strip().rstrip('.')
+    cleaned = value.strip().rstrip(".")
     try:
         return datetime.strptime(cleaned, "%d.%m.%Y").date()
     except ValueError:
@@ -50,9 +49,9 @@ def parse_gender(value) -> Gender | None:
         return None
     v = str(value).strip().lower()
     logger.debug("parse_gender: raw=%r, normalized=%r", value, v)
-    if v == 'm':
+    if v == "m":
         return Gender.MALE
-    if v in ('z', 'ž'):
+    if v in ("z", "ž"):
         return Gender.FEMALE
     return None
 
@@ -74,7 +73,7 @@ def parse_price(row: list, price_idx: int = 6, fallback_idx: int = 7) -> Decimal
         if idx < len(row) and row[idx] is not None:
             raw = str(row[idx]).strip()
             # Remove currency suffix (e.g. "Din.", "din", "RSD")
-            raw = re.sub(r'[A-Za-z.]+$', '', raw).strip()
+            raw = re.sub(r"[A-Za-z.]+$", "", raw).strip()
             if not raw:
                 continue
             # Determine format by looking at last separator
@@ -82,17 +81,17 @@ def parse_price(row: list, price_idx: int = 6, fallback_idx: int = 7) -> Decimal
             # "4,000.00" -> US (comma=thousands, dot=decimal)
             # "4000,00"  -> European no thousands sep
             # "4000.00"  -> US no thousands sep
-            last_dot = raw.rfind('.')
-            last_comma = raw.rfind(',')
+            last_dot = raw.rfind(".")
+            last_comma = raw.rfind(",")
             if last_comma > last_dot:
                 # European: dots are thousands, comma is decimal
-                raw = raw.replace('.', '').replace(',', '.')
+                raw = raw.replace(".", "").replace(",", ".")
             elif last_dot > last_comma:
                 # US: commas are thousands, dot is decimal
-                raw = raw.replace(',', '')
+                raw = raw.replace(",", "")
             else:
                 # No separators or only one type — try as-is
-                raw = raw.replace(',', '.')
+                raw = raw.replace(",", ".")
             try:
                 return Decimal(raw)
             except (InvalidOperation, ValueError):
@@ -122,7 +121,6 @@ def _empty_counts() -> dict:
         "patients_incomplete": 0,
         "visits_incomplete": 0,
     }
-
 
 
 class DoctorIndex(NamedTuple):
@@ -174,21 +172,19 @@ def _resolve_doctor(
     return random.choice(doctors.ids) if doctors.ids else None
 
 
-
 class PatientHeader(NamedTuple):
     fields: dict
     incomplete: bool
 
 
-def _parse_patient_header(
-    rows: list, filename: str, errors: list[str]
-) -> Optional[PatientHeader]:
+def _parse_patient_header(rows: list, filename: str, errors: list[str]) -> Optional[PatientHeader]:
     """Read the patient block. Returns None when the name is unusable.
 
     Unreadable gender and date-of-birth are not fatal: the card is imported
     with a documented default and flagged `import_incomplete` so somebody can
     fix it in the UI later.
     """
+
     def cell(row_idx: int):
         row = rows[row_idx]
         return row[PATIENT_COLUMN] if len(row) > PATIENT_COLUMN else None
@@ -292,7 +288,6 @@ def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
         )
 
 
-
 def _import_workbook(
     db: Session,
     filename: str,
@@ -342,13 +337,9 @@ def _import_workbook(
             counts["patients_incomplete"] += 1
 
     for visit_row in _iter_visit_rows(rows):
-        doctor_id = _resolve_doctor(
-            override_doctor_id, visit_row.doctor_initial, doctors
-        )
+        doctor_id = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
         if not doctor_id:
-            errors.append(
-                f"{filename} row {visit_row.row_number}: No doctors in system, skipping"
-            )
+            errors.append(f"{filename} row {visit_row.row_number}: No doctors in system, skipping")
             continue
 
         already_imported = (
@@ -393,11 +384,7 @@ def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
         return None
     db = SessionLocal()
     try:
-        doctor = (
-            db.query(User)
-            .filter(User.id == doctor_id, User.role == UserRole.DOCTOR)
-            .first()
-        )
+        doctor = db.query(User).filter(User.id == doctor_id, User.role == UserRole.DOCTOR).first()
         if not doctor:
             raise HTTPException(
                 status_code=400,
@@ -406,7 +393,6 @@ def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
         return doctor.id
     finally:
         db.close()
-
 
 
 @router.post("/xlsx")
@@ -447,13 +433,15 @@ async def import_xlsx_files(
             doctors = _load_doctor_index()
 
             for i, (filename, content) in enumerate(file_data):
-                yield _sse({
-                    "type": "progress",
-                    "current": i + 1,
-                    "total": total,
-                    "file": filename,
-                    "status": "processing",
-                })
+                yield _sse(
+                    {
+                        "type": "progress",
+                        "current": i + 1,
+                        "total": total,
+                        "file": filename,
+                        "status": "processing",
+                    }
+                )
 
                 file_errors: list[str] = []
                 file_counts = _empty_counts()
@@ -487,14 +475,16 @@ async def import_xlsx_files(
                 summary["errors"].extend(file_errors)
                 summary["files_processed"] += 1
 
-                yield _sse({
-                    "type": "file_done",
-                    "current": i + 1,
-                    "total": total,
-                    "file": filename,
-                    **file_counts,
-                    "errors": file_errors,
-                })
+                yield _sse(
+                    {
+                        "type": "file_done",
+                        "current": i + 1,
+                        "total": total,
+                        "file": filename,
+                        **file_counts,
+                        "errors": file_errors,
+                    }
+                )
 
             yield _sse({"type": "complete", "summary": summary})
 

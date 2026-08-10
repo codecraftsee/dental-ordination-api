@@ -50,14 +50,10 @@ def test_unhandled_errors_return_a_generic_500(client):
         raise RuntimeError(f'relation "visits" does not exist -- {leaky}')
 
     try:
-        resp = client.get(
-            "/_boom_test_only", headers={"Origin": "http://localhost:4200"}
-        )
+        resp = client.get("/_boom_test_only", headers={"Origin": "http://localhost:4200"})
     finally:
         app.router.routes = [
-            r
-            for r in app.router.routes
-            if getattr(r, "path", None) != "/_boom_test_only"
+            r for r in app.router.routes if getattr(r, "path", None) != "/_boom_test_only"
         ]
 
     assert resp.status_code == 500
@@ -69,9 +65,7 @@ def test_unhandled_errors_return_a_generic_500(client):
     assert resp.headers.get("access-control-allow-origin") == "http://localhost:4200"
 
 
-def test_failed_patient_delete_does_not_leak_db_errors(
-    client, admin_token, patient, monkeypatch
-):
+def test_failed_patient_delete_does_not_leak_db_errors(client, admin_token, patient, monkeypatch):
     from sqlalchemy.orm import Session
 
     def explode(self, instance):
@@ -103,9 +97,7 @@ class TestAdminLockout:
         assert resp.json()["detail"] == "You cannot deactivate your own account"
         assert client.get("/api/auth/me", headers=auth(admin_token)).status_code == 200
 
-    def test_an_admin_cannot_deactivate_themselves_via_update(
-        self, client, admin_token
-    ):
+    def test_an_admin_cannot_deactivate_themselves_via_update(self, client, admin_token):
         me = client.get("/api/auth/me", headers=auth(admin_token)).json()
 
         resp = client.put(
@@ -127,10 +119,7 @@ class TestAdminLockout:
 
         assert resp.status_code == 400
         assert resp.json()["detail"] == "Cannot remove the last active admin"
-        assert (
-            client.get("/api/auth/me", headers=auth(admin_token)).json()["role"]
-            == "ADMIN"
-        )
+        assert client.get("/api/auth/me", headers=auth(admin_token)).json()["role"] == "ADMIN"
 
     def test_an_admin_can_demote_themselves_once_another_admin_exists(
         self, client, admin_token, make_user
@@ -148,9 +137,7 @@ class TestAdminLockout:
         assert resp.status_code == 200
         assert resp.json()["role"] == "NURSE"
 
-    def test_a_second_admin_can_still_be_deleted(
-        self, client, admin_token, make_user
-    ):
+    def test_a_second_admin_can_still_be_deleted(self, client, admin_token, make_user):
         from app.models.user import UserRole
 
         other = make_user(role=UserRole.ADMIN)

@@ -47,34 +47,38 @@ class Permission(str, PyEnum):
 _ALL = frozenset(Permission)
 
 # Doctor: read all, create/update patients/visits/diagnoses/treatments
-_DOCTOR = frozenset({
-    Permission.PATIENTS_READ,
-    Permission.PATIENTS_CREATE,
-    Permission.PATIENTS_UPDATE,
-    Permission.VISITS_READ,
-    Permission.VISITS_CREATE,
-    Permission.VISITS_UPDATE,
-    Permission.DIAGNOSES_READ,
-    Permission.DIAGNOSES_CREATE,
-    Permission.DIAGNOSES_UPDATE,
-    Permission.TREATMENTS_READ,
-    Permission.TREATMENTS_CREATE,
-    Permission.TREATMENTS_UPDATE,
-    Permission.USERS_READ,
-    Permission.PATIENT_DOCUMENTS_READ,
-    Permission.PATIENT_DOCUMENTS_CREATE,
-    Permission.PATIENT_DOCUMENTS_DELETE,
-})
+_DOCTOR = frozenset(
+    {
+        Permission.PATIENTS_READ,
+        Permission.PATIENTS_CREATE,
+        Permission.PATIENTS_UPDATE,
+        Permission.VISITS_READ,
+        Permission.VISITS_CREATE,
+        Permission.VISITS_UPDATE,
+        Permission.DIAGNOSES_READ,
+        Permission.DIAGNOSES_CREATE,
+        Permission.DIAGNOSES_UPDATE,
+        Permission.TREATMENTS_READ,
+        Permission.TREATMENTS_CREATE,
+        Permission.TREATMENTS_UPDATE,
+        Permission.USERS_READ,
+        Permission.PATIENT_DOCUMENTS_READ,
+        Permission.PATIENT_DOCUMENTS_CREATE,
+        Permission.PATIENT_DOCUMENTS_DELETE,
+    }
+)
 
 # Nurse: read-only
-_NURSE = frozenset({
-    Permission.PATIENTS_READ,
-    Permission.VISITS_READ,
-    Permission.DIAGNOSES_READ,
-    Permission.TREATMENTS_READ,
-    Permission.USERS_READ,
-    Permission.PATIENT_DOCUMENTS_READ,
-})
+_NURSE = frozenset(
+    {
+        Permission.PATIENTS_READ,
+        Permission.VISITS_READ,
+        Permission.DIAGNOSES_READ,
+        Permission.TREATMENTS_READ,
+        Permission.USERS_READ,
+        Permission.PATIENT_DOCUMENTS_READ,
+    }
+)
 
 ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
     UserRole.ADMIN: _ALL,

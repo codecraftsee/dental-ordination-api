@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/treatments", tags=["treatments"])
 def list_treatments(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))],
-    category: Optional[TreatmentCategory] = Query(None)
+    category: Optional[TreatmentCategory] = Query(None),
 ):
     query = db.query(Treatment)
 
@@ -34,11 +34,9 @@ def list_treatments(
 def create_treatment(
     treatment_data: TreatmentCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_CREATE))],
 ):
-    ensure_code_available(
-        db, Treatment, treatment_data.code, "Treatment code already exists"
-    )
+    ensure_code_available(db, Treatment, treatment_data.code, "Treatment code already exists")
 
     treatment = Treatment(**treatment_data.model_dump())
     db.add(treatment)
@@ -51,7 +49,7 @@ def create_treatment(
 def get_treatment(
     treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))],
 ):
     return get_or_404(db, Treatment, treatment_id, "Treatment")
 
@@ -61,7 +59,7 @@ def update_treatment(
     treatment_id: str,
     treatment_data: TreatmentUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_UPDATE))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_UPDATE))],
 ):
     treatment = get_or_404(db, Treatment, treatment_id, "Treatment")
 
@@ -86,7 +84,7 @@ def update_treatment(
 def delete_treatment(
     treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_DELETE))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_DELETE))],
 ):
     treatment = get_or_404(db, Treatment, treatment_id, "Treatment")
     db.delete(treatment)

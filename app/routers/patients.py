@@ -24,9 +24,9 @@ def list_patients(
     if search:
         search_term = f"%{search}%"
         query = query.filter(
-            (Patient.first_name.ilike(search_term)) |
-            (Patient.last_name.ilike(search_term)) |
-            (Patient.phone.ilike(search_term))
+            (Patient.first_name.ilike(search_term))
+            | (Patient.last_name.ilike(search_term))
+            | (Patient.phone.ilike(search_term))
         )
 
     if city:
@@ -42,7 +42,7 @@ def list_patients(
 def create_patient(
     patient_data: PatientCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_CREATE))],
 ):
     patient = Patient(**patient_data.model_dump())
     db.add(patient)
@@ -55,7 +55,7 @@ def create_patient(
 def get_patient(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_READ))]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_READ))],
 ):
     return get_or_404(db, Patient, patient_id, "Patient")
 
@@ -65,7 +65,7 @@ def update_patient(
     patient_id: str,
     patient_data: PatientUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_UPDATE))]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_UPDATE))],
 ):
     patient = get_or_404(db, Patient, patient_id, "Patient")
     apply_update(patient, patient_data.model_dump(exclude_unset=True))
@@ -78,7 +78,7 @@ def update_patient(
 def dismiss_import_warning(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_UPDATE))]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_UPDATE))],
 ):
     patient = get_or_404(db, Patient, patient_id, "Patient")
     patient.import_incomplete = False
@@ -91,7 +91,7 @@ def dismiss_import_warning(
 def delete_patient(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_DELETE))]
+    _: Annotated[User, Depends(require_permission(Permission.PATIENTS_DELETE))],
 ):
     patient = get_or_404(db, Patient, patient_id, "Patient")
     db.delete(patient)

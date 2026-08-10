@@ -22,12 +22,14 @@ router = APIRouter(prefix="/api/patients/{patient_id}/documents", tags=["patient
 MAX_SIZE_BYTES = 25 * 1024 * 1024
 MAX_FILENAME_LENGTH = 255
 MAX_DESCRIPTION_LENGTH = 500
-ALLOWED_CONTENT_TYPES = frozenset({
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "application/pdf",
-})
+ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "application/pdf",
+    }
+)
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -84,9 +86,7 @@ def _to_response(doc: PatientDocument) -> PatientDocumentResponse:
     )
 
 
-def _get_document_or_404(
-    db: Session, patient_id: str, document_id: str
-) -> PatientDocument:
+def _get_document_or_404(db: Session, patient_id: str, document_id: str) -> PatientDocument:
     """Look a document up *within* its patient, so ids from another patient 404."""
     doc = (
         db.query(PatientDocument)
