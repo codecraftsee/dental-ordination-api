@@ -49,7 +49,7 @@ def list_users(
     current_user: Annotated[User, Depends(require_permission(Permission.USERS_READ))],
     role: Optional[UserRole] = Query(None),
 ):
-    query = db.query(User).filter(User.is_active == True)
+    query = db.query(User).filter(User.is_active == True)  # noqa: E712 — SQL comparison
     if current_user.role != UserRole.ADMIN:
         query = query.filter(User.role != UserRole.ADMIN)
     if role:

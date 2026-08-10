@@ -399,7 +399,11 @@ def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
 async def import_xlsx_files(
     files: List[UploadFile] = File(...),
     doctor_id: Optional[str] = Form(None),
-    current_user: User = Depends(require_permission(Permission.ADMIN_IMPORT)),
+    # Named `_` like every other router: the value is never read, but the
+    # dependency is what makes this endpoint admin-only. Deleting it because a
+    # linter calls the argument unused would open patient-data import to every
+    # role. Covered by tests/test_permissions.py.
+    _: User = Depends(require_permission(Permission.ADMIN_IMPORT)),
 ):
     """Import one or more XLSX dental card files, streaming progress via SSE.
 

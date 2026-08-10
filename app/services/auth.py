@@ -57,9 +57,12 @@ def verify_invite_token(token: str) -> str:
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except JWTError:
+        # `from None` deliberately, not `from err`: the JWT failure is the cause,
+        # but chaining it prints the raw token handling into the traceback, and
+        # the client is told nothing beyond "invalid or expired" either way.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired invite link"
-        )
+        ) from None
     if payload.get("type") != "set_password":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid invite link")
     user_id = payload.get("sub")
