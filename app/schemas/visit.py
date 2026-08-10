@@ -5,6 +5,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
+# Aliased purely so `VisitUpdate` can annotate its `date` field.
+#
+# PEP 526 makes a class-body annotated assignment bind the name *before* it
+# evaluates the annotation. So inside `class VisitUpdate`, by the time
+# `date: ... = None` is annotated, the bare name `date` already refers to that
+# field's own default of None rather than to datetime.date. Spelled
+# `Optional[date]` this resolved silently to `Optional[None]`, and the field
+# rejected every real date with a 422. This alias is a name the field cannot
+# shadow. Do not inline it.
+DateType = date
+
 
 class VisitBase(BaseModel):
     patient_id: UUID
@@ -26,7 +37,7 @@ class VisitCreate(VisitBase):
 class VisitUpdate(BaseModel):
     patient_id: Optional[UUID] = None
     doctor_id: Optional[UUID] = None
-    date: Optional[date] = None
+    date: Optional[DateType] = None
     tooth_number: Optional[int] = None
     diagnosis_id: Optional[UUID] = None
     diagnosis_notes: Optional[str] = None

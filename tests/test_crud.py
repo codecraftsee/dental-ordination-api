@@ -136,6 +136,31 @@ def test_visit_lifecycle_and_embedded_doctor(client, admin_token, patient, docto
     assert client.delete(f"/api/visits/{visit_id}", headers=headers).status_code == 204
 
 
+def test_a_visit_date_can_actually_be_changed(client, admin_token, patient, doctor):
+    """Regression: VisitUpdate.date used to be annotated NoneType.
+
+    The field name shadowed the imported `date` type inside the class body, so
+    `Optional[date]` silently became `Optional[None]` and every real date was
+    rejected with a 422. Nothing caught it because the lifecycle test above only
+    ever updates `paid`.
+    """
+    headers = auth(admin_token)
+    visit_id = client.post(
+        "/api/visits",
+        json={"patient_id": patient["id"], "doctor_id": doctor.id, "date": "2024-03-01"},
+        headers=headers,
+    ).json()["id"]
+
+    updated = client.put(f"/api/visits/{visit_id}", json={"date": "2024-09-30"}, headers=headers)
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["date"] == "2024-09-30"
+
+    # and null is still rejected, since visits.date is NOT NULL
+    nulled = client.put(f"/api/visits/{visit_id}", json={"date": None}, headers=headers)
+    assert nulled.status_code == 400
+    assert nulled.json()["detail"] == "Field 'date' cannot be null"
+
+
 def test_visit_filters(client, admin_token, patient, doctor):
     headers = auth(admin_token)
     for visit_date in ("2024-01-15", "2024-06-15"):
