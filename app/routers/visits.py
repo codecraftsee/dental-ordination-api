@@ -1,5 +1,5 @@
 from datetime import date
-from typing import Annotated, List, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session, joinedload
@@ -15,15 +15,15 @@ from app.schemas.visit import VisitCreate, VisitResponse, VisitUpdate
 router = APIRouter(prefix="/api/visits", tags=["visits"])
 
 
-@router.get("", response_model=List[VisitResponse])
+@router.get("", response_model=list[VisitResponse])
 def list_visits(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.VISITS_READ))],
-    patient_id: Optional[str] = Query(None),
-    doctor_id: Optional[str] = Query(None),
-    date_from: Optional[date] = Query(None),
-    date_to: Optional[date] = Query(None),
-    import_incomplete: Optional[bool] = Query(None),
+    patient_id: str | None = Query(None),
+    doctor_id: str | None = Query(None),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    import_incomplete: bool | None = Query(None),
 ):
     query = db.query(Visit).options(joinedload(Visit.doctor))
 

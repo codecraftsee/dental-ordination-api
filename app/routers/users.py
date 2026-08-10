@@ -1,5 +1,5 @@
 import logging
-from typing import Annotated, List, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -44,11 +44,11 @@ def _assert_not_last_active_admin(db: Session, user: User) -> None:
         )
 
 
-@router.get("", response_model=List[UserResponse])
+@router.get("", response_model=list[UserResponse])
 def list_users(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission(Permission.USERS_READ))],
-    role: Optional[UserRole] = Query(None),
+    role: UserRole | None = Query(None),
 ):
     query = db.query(User).filter(User.is_active == True)  # noqa: E712 — SQL comparison
     if current_user.role != UserRole.ADMIN:

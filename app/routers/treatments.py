@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
@@ -14,11 +14,11 @@ from app.schemas.treatment import TreatmentCreate, TreatmentResponse, TreatmentU
 router = APIRouter(prefix="/api/treatments", tags=["treatments"])
 
 
-@router.get("", response_model=List[TreatmentResponse])
+@router.get("", response_model=list[TreatmentResponse])
 def list_treatments(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))],
-    category: Optional[TreatmentCategory] = Query(None),
+    category: TreatmentCategory | None = Query(None),
 ):
     query = db.query(Treatment)
 

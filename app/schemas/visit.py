@@ -1,6 +1,5 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -21,12 +20,12 @@ class VisitBase(BaseModel):
     patient_id: UUID
     doctor_id: UUID
     date: date
-    tooth_number: Optional[int] = None
-    diagnosis_id: Optional[UUID] = None
-    diagnosis_notes: Optional[str] = None
-    treatment_id: Optional[UUID] = None
-    treatment_notes: Optional[str] = None
-    price: Optional[Decimal] = None
+    tooth_number: int | None = None
+    diagnosis_id: UUID | None = None
+    diagnosis_notes: str | None = None
+    treatment_id: UUID | None = None
+    treatment_notes: str | None = None
+    price: Decimal | None = None
     paid: bool = True
 
 
@@ -35,22 +34,22 @@ class VisitCreate(VisitBase):
 
 
 class VisitUpdate(BaseModel):
-    patient_id: Optional[UUID] = None
-    doctor_id: Optional[UUID] = None
-    date: Optional[DateType] = None
-    tooth_number: Optional[int] = None
-    diagnosis_id: Optional[UUID] = None
-    diagnosis_notes: Optional[str] = None
-    treatment_id: Optional[UUID] = None
-    treatment_notes: Optional[str] = None
-    price: Optional[Decimal] = None
-    paid: Optional[bool] = None
+    patient_id: UUID | None = None
+    doctor_id: UUID | None = None
+    date: DateType | None = None
+    tooth_number: int | None = None
+    diagnosis_id: UUID | None = None
+    diagnosis_notes: str | None = None
+    treatment_id: UUID | None = None
+    treatment_notes: str | None = None
+    price: Decimal | None = None
+    paid: bool | None = None
 
 
 class DoctorBrief(BaseModel):
     id: UUID
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
+    first_name: str | None = None
+    last_name: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -60,6 +59,6 @@ class VisitResponse(VisitBase):
     import_incomplete: bool
     created_at: datetime
     updated_at: datetime
-    doctor: Optional[DoctorBrief] = None
+    doctor: DoctorBrief | None = None
 
     model_config = ConfigDict(from_attributes=True)

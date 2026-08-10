@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
@@ -14,13 +14,13 @@ from app.schemas.patient import PatientCreate, PatientResponse, PatientUpdate
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 
 
-@router.get("", response_model=List[PatientResponse])
+@router.get("", response_model=list[PatientResponse])
 def list_patients(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.PATIENTS_READ))],
-    search: Optional[str] = Query(None),
-    city: Optional[str] = Query(None),
-    import_incomplete: Optional[bool] = Query(None),
+    search: str | None = Query(None),
+    city: str | None = Query(None),
+    import_incomplete: bool | None = Query(None),
 ):
     query = db.query(Patient)
 

@@ -1,7 +1,7 @@
 import logging
 import re
 import uuid
-from typing import Annotated, List, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
@@ -44,7 +44,7 @@ def _validate_upload(
     content_type: str,
     size: int,
     filename: str,
-    description: Optional[str],
+    description: str | None,
 ) -> None:
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -105,7 +105,7 @@ def _get_document_or_404(db: Session, patient_id: str, document_id: str) -> Pati
     return doc
 
 
-@router.get("", response_model=List[PatientDocumentResponse])
+@router.get("", response_model=list[PatientDocumentResponse])
 def list_documents(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
@@ -127,7 +127,7 @@ async def upload_document(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission(Permission.PATIENT_DOCUMENTS_CREATE))],
     file: UploadFile = File(...),
-    description: Optional[str] = Form(None),
+    description: str | None = Form(None),
 ):
     get_or_404(db, Patient, patient_id, "Patient")
 

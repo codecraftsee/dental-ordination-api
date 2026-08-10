@@ -12,12 +12,21 @@ select = [
     "F",   # pyflakes — unused imports, undefined names
     "I",   # isort — import ordering
     "B",   # flake8-bugbear — likely bugs
+    "UP",  # pyupgrade — modern syntax for the pinned Python 3.12
 ]
 
-# `UP` (pyupgrade) is deliberately absent. It rewrites `Optional[str]` into
-# `str | None`, which is a worthwhile change but a separate one — enabling it
-# here would fold that rewrite into the formatting pass and make the diff
-# unreviewable. It gets turned on in its own step.
+ignore = [
+    # Rewrites `class UserRole(str, Enum)` into `StrEnum`. That is a behaviour
+    # change, not a modernisation: str() and f-strings give "UserRole.ADMIN" for
+    # a (str, Enum) member and "ADMIN" for a StrEnum one. These enums reach the
+    # API through Pydantic and the database through SQLAlchemy, so the two are
+    # not interchangeable. Nothing stringifies them bare today, which is exactly
+    # why the change would pass the suite and surface later.
+    "UP042",
+    # PEP 695 `def get_or_404[ModelT](...)` instead of an explicit TypeVar.
+    # Valid on 3.12, has no autofix, and is a style preference not a cleanup.
+    "UP047",
+]
 
 [tool.ruff.lint.flake8-bugbear]
 # B008 warns that a function call in an argument default is evaluated once, at

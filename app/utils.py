@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def utcnow() -> datetime:
@@ -12,4 +12,4 @@ def utcnow() -> datetime:
     Making the columns timezone-aware would be a schema migration, not a
     deprecation fix — worth doing separately, if at all.
     """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)

@@ -2,10 +2,11 @@ import json
 import logging
 import random
 import re
+from collections.abc import Iterator
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
-from typing import Iterator, List, NamedTuple, Optional
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -158,10 +159,10 @@ def _load_doctor_index() -> DoctorIndex:
 
 
 def _resolve_doctor(
-    override_doctor_id: Optional[str],
-    doctor_initial: Optional[str],
+    override_doctor_id: str | None,
+    doctor_initial: str | None,
     doctors: DoctorIndex,
-) -> Optional[str]:
+) -> str | None:
     """A caller-supplied doctor wins, then an initial match, then any doctor."""
     if override_doctor_id:
         return override_doctor_id
@@ -177,7 +178,7 @@ class PatientHeader(NamedTuple):
     incomplete: bool
 
 
-def _parse_patient_header(rows: list, filename: str, errors: list[str]) -> Optional[PatientHeader]:
+def _parse_patient_header(rows: list, filename: str, errors: list[str]) -> PatientHeader | None:
     """Read the patient block. Returns None when the name is unusable.
 
     Unreadable gender and date-of-birth are not fatal: the card is imported
@@ -237,11 +238,11 @@ def _parse_patient_header(rows: list, filename: str, errors: list[str]) -> Optio
 class VisitRow(NamedTuple):
     row_number: int
     visit_date: date
-    diagnosis_notes: Optional[str]
-    treatment_notes: Optional[str]
-    doctor_initial: Optional[str]
-    tooth_number: Optional[int]
-    price: Optional[Decimal]
+    diagnosis_notes: str | None
+    treatment_notes: str | None
+    doctor_initial: str | None
+    tooth_number: int | None
+    price: Decimal | None
 
 
 def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
@@ -251,7 +252,7 @@ def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
     the row above". Rows before the first date, and rows with neither a
     diagnosis nor a treatment, are skipped silently.
     """
-    current_date: Optional[date] = None
+    current_date: date | None = None
 
     for row_idx in range(FIRST_VISIT_ROW, len(rows)):
         row = rows[row_idx]
@@ -293,7 +294,7 @@ def _import_workbook(
     filename: str,
     content: bytes,
     doctors: DoctorIndex,
-    override_doctor_id: Optional[str],
+    override_doctor_id: str | None,
     counts: dict,
     errors: list[str],
 ) -> None:
@@ -374,7 +375,7 @@ def _import_workbook(
             counts["visits_incomplete"] += 1
 
 
-def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
+def _validate_override_doctor(doctor_id: str | None) -> str | None:
     """Check a caller-supplied doctor_id before the response starts streaming.
 
     Once the StreamingResponse begins, the status code is already sent — so a
@@ -397,8 +398,8 @@ def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
 
 @router.post("/xlsx")
 async def import_xlsx_files(
-    files: List[UploadFile] = File(...),
-    doctor_id: Optional[str] = Form(None),
+    files: list[UploadFile] = File(...),
+    doctor_id: str | None = Form(None),
     # Named `_` like every other router: the value is never read, but the
     # dependency is what makes this endpoint admin-only. Deleting it because a
     # linter calls the argument unused would open patient-data import to every
