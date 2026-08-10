@@ -20,7 +20,8 @@ Python 3.12 — see `.python-version`.
 ### 2. Dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # local work: runtime + pytest + ruff
+pip install -r requirements.txt       # runtime only, what the Docker image installs
 ```
 
 ### 3. Configuration

@@ -1,0 +1,15 @@
+# Development and test dependencies.
+#
+# The Dockerfile installs requirements.txt only, so nothing listed here reaches
+# the deployed image. Install both locally:
+#
+#     pip install -r requirements-dev.txt
+#
+# httpx is deliberately NOT here despite being what TestClient rides on — it is
+# a genuine runtime dependency of supabase, so it stays pinned in
+# requirements.txt where the deployed image gets it.
+
+-r requirements.txt
+
+pytest==8.3.3
+ruff==0.16.2

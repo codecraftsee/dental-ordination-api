@@ -21,7 +21,9 @@ venv/bin/ruff check app tests        # lint
 venv/bin/ruff format app tests       # format
 ```
 
-Rules are `E`, `F`, `I`, `B` at line-length 100. Two deliberate exclusions:
+Rules are `E`, `F`, `I`, `B`, `UP` at line-length 100. The exclusions are all in
+`pyproject.toml` with their reasoning; do not drop any of them while
+"tidying" the config:
 
 - `B008` is neutralised via `extend-immutable-calls`. A function call in an
   argument default is FastAPI's dependency-injection mechanism, not the bug the
@@ -32,6 +34,16 @@ Rules are `E`, `F`, `I`, `B` at line-length 100. Two deliberate exclusions:
   commented-out code. Worst case was `import_xlsx.py`'s permission dependency,
   reported as an unused argument while being the only thing keeping that
   endpoint admin-only.
+- `UP042` is ignored. It rewrites `class UserRole(str, Enum)` into `StrEnum`,
+  which changes what `str()` and f-strings produce — `"UserRole.ADMIN"` against
+  `"ADMIN"`. These enums reach the API through Pydantic and the database through
+  SQLAlchemy. Nothing stringifies them bare today, which is why the change would
+  pass the suite and surface later.
+- `UP047` is ignored: PEP 695 generics instead of the `ModelT` TypeVar, no
+  autofix, a style preference.
+- `E501` is ignored. The formatter owns line length and wraps everything it can;
+  what remains are string literals it cannot split, so leaving the rule on made
+  `ruff check` and `ruff format` permanently disagree.
 
 ## Tests
 Tests run against **real PostgreSQL**, never SQLite — same engine as production.
@@ -125,10 +137,15 @@ Documented here so nobody assumes these already work.
     current way to cut someone off.
 
 ## Key Files
-- `app/main.py` — app entry point, startup seeds admin + diagnoses + treatments
+- `app/main.py` — app entry point, CORS, routers, and `run_startup_migrations()`
+- `app/seeds.py` — the default admin plus the diagnosis/treatment catalogues,
+  called by `run_startup_migrations()`
 - `app/config.py` — settings via pydantic-settings, reads `.env`
 - `app/database.py` — SQLAlchemy engine/session
-- `app/dependencies.py` — auth dependencies (get_current_user, require_admin, etc.)
+- `app/dependencies.py` — auth dependencies only: `get_current_user`,
+  `require_permission`, `oauth2_scheme`. Everything here is for `Depends()`
+- `app/db_helpers.py` — row helpers the route bodies call directly:
+  `get_or_404`, `apply_update`, `ensure_code_available`
 - `app/routers/` — one file per resource
 - `app/models/` — SQLAlchemy models
 - `app/schemas/` — Pydantic request/response schemas
@@ -140,9 +157,18 @@ Documented here so nobody assumes these already work.
   `run_startup_migrations()` in `app/main.py`)
 
 ## Environment Variables (.env)
+
+`SECRET_KEY` below is the built-in default **verbatim**, and that is deliberate:
+`app/config.py` recognises this exact string and refuses to boot whenever
+`APP_ENV` is anything other than `local`. Do not "improve" it into a different
+placeholder — a value the guard does not recognise lets a deployed instance
+start while signing JWTs with a key that is public in this repository. Generate
+a real one with `python3 -c "import secrets; print(secrets.token_urlsafe(64))"`.
+
 ```
+APP_ENV=local
 DATABASE_URL=postgresql://postgres:password@localhost:5432/dental_ordination
-SECRET_KEY=your-secret-key
+SECRET_KEY=your-super-secret-key-change-in-production
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7

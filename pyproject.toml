@@ -26,6 +26,13 @@ ignore = [
     # PEP 695 `def get_or_404[ModelT](...)` instead of an explicit TypeVar.
     # Valid on 3.12, has no autofix, and is a style preference not a cleanup.
     "UP047",
+    # Line length is the formatter's job, and it already wraps everything it
+    # can. What survives are string literals it is not allowed to split — a SQL
+    # statement, an error message, and the invite email's HTML. Leaving E501 on
+    # meant `ruff check` reported five errors that `ruff format` would never
+    # fix, so the two commands permanently disagreed and the documented lint
+    # command exited 1 on a clean checkout.
+    "E501",
 ]
 
 [tool.ruff.lint.flake8-bugbear]

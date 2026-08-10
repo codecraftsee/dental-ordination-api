@@ -12,9 +12,9 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt<4.1
 python-multipart==0.0.9
-pytest==8.3.3
+# Runtime, not test-only: supabase and its five sub-packages all require httpx.
+# Pinned here so the deployed image cannot resolve a different version.
 httpx==0.27.2
-ruff==0.16.2
 openpyxl==3.1.5
 resend
 supabase==2.9.1
