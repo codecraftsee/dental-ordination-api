@@ -1,8 +1,10 @@
 import uuid
-from app.utils import utcnow
 from enum import Enum as PyEnum
-from sqlalchemy import Column, String, Boolean, DateTime, Enum
+
+from sqlalchemy import Boolean, Column, DateTime, Enum, String
+
 from app.database import Base
+from app.utils import utcnow
 
 
 class UserRole(str, PyEnum):

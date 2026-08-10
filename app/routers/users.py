@@ -1,15 +1,18 @@
 import logging
-from typing import Annotated, List, Optional
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+
+from app.config import get_settings
 from app.database import get_db
+from app.db_helpers import apply_update, get_or_404
+from app.dependencies import require_permission
 from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, to_user_response
+from app.permissions import Permission
+from app.schemas.user import UserCreate, UserResponse, UserUpdate, to_user_response
 from app.services.auth import create_invite_token
 from app.services.email import send_invite_email
-from app.dependencies import apply_update, get_or_404, require_permission
-from app.permissions import Permission
-from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +44,13 @@ def _assert_not_last_active_admin(db: Session, user: User) -> None:
         )
 
 
-@router.get("", response_model=List[UserResponse])
+@router.get("", response_model=list[UserResponse])
 def list_users(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission(Permission.USERS_READ))],
-    role: Optional[UserRole] = Query(None),
+    role: UserRole | None = Query(None),
 ):
-    query = db.query(User).filter(User.is_active == True)
+    query = db.query(User).filter(User.is_active == True)  # noqa: E712 — SQL comparison
     if current_user.role != UserRole.ADMIN:
         query = query.filter(User.role != UserRole.ADMIN)
     if role:
@@ -59,10 +62,12 @@ def list_users(
 def create_user(
     data: UserCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))],
 ):
     if db.query(User).filter(User.email == data.email).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered"
+        )
 
     user = User(
         email=data.email,
@@ -93,11 +98,13 @@ def create_user(
 def resend_invite(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))],
 ):
     user = get_or_404(db, User, user_id, "User")
     if not user.must_set_password:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User has already set their password")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="User has already set their password"
+        )
 
     settings = get_settings()
     token = create_invite_token(user.id)
@@ -113,7 +120,7 @@ def resend_invite(
 def get_user(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_READ))]
+    _: Annotated[User, Depends(require_permission(Permission.USERS_READ))],
 ):
     return to_user_response(get_or_404(db, User, user_id, "User"))
 
@@ -123,7 +130,7 @@ def update_user(
     user_id: str,
     data: UserUpdate,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))],
 ):
     user = get_or_404(db, User, user_id, "User")
 
@@ -131,7 +138,9 @@ def update_user(
 
     if "email" in update:
         if db.query(User).filter(User.email == update["email"], User.id != user_id).first():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use"
+            )
 
     deactivating = update.get("is_active") is False
     demoting = "role" in update and update["role"] != UserRole.ADMIN
@@ -154,7 +163,7 @@ def update_user(
 def delete_user(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    current_user: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))],
 ):
     user = get_or_404(db, User, user_id, "User")
     if user.id == current_user.id:

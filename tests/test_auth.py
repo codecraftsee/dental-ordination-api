@@ -20,9 +20,7 @@ def test_login_returns_a_token_pair(client):
 
 
 def test_login_with_wrong_password_is_401(client):
-    resp = client.post(
-        "/api/auth/login", data={"username": ADMIN_EMAIL, "password": "wrong"}
-    )
+    resp = client.post("/api/auth/login", data={"username": ADMIN_EMAIL, "password": "wrong"})
     assert resp.status_code == 401
     assert resp.json()["detail"] == "Incorrect email or password"
 
@@ -37,9 +35,7 @@ def test_login_with_unknown_email_is_401(client):
 
 def test_disabled_user_cannot_log_in(client, make_user):
     user = make_user(is_active=False)
-    resp = client.post(
-        "/api/auth/login", data={"username": user.email, "password": "Test123#"}
-    )
+    resp = client.post("/api/auth/login", data={"username": user.email, "password": "Test123#"})
     assert resp.status_code == 403
     assert resp.json()["detail"] == "User account is disabled"
 
@@ -66,9 +62,7 @@ def test_refresh_issues_a_new_pair(client):
         data={"username": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
     ).json()
 
-    resp = client.post(
-        "/api/auth/refresh", json={"refresh_token": tokens["refresh_token"]}
-    )
+    resp = client.post("/api/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
     assert resp.status_code == 200
     assert resp.json()["access_token"]
     assert resp.json()["refresh_token"]
@@ -137,9 +131,7 @@ def test_change_password_then_login_with_the_new_one(client, make_user):
     assert resp.status_code == 200
 
     assert login(client, user.email, "NewPass456#")
-    failed = client.post(
-        "/api/auth/login", data={"username": user.email, "password": "Test123#"}
-    )
+    failed = client.post("/api/auth/login", data={"username": user.email, "password": "Test123#"})
     assert failed.status_code == 401
 
 
@@ -162,9 +154,7 @@ class TestSetPassword:
 
         return create_invite_token(user_id)
 
-    def test_an_invited_user_sets_their_password_and_gets_tokens(
-        self, client, make_user
-    ):
+    def test_an_invited_user_sets_their_password_and_gets_tokens(self, client, make_user):
         user = self._invited(make_user)
 
         resp = client.post(
@@ -237,9 +227,7 @@ class TestSetPassword:
         assert resp.status_code == 404
         assert resp.json()["detail"] == "User not found"
 
-    def test_the_link_cannot_be_reused_once_the_password_is_set(
-        self, client, make_user
-    ):
+    def test_the_link_cannot_be_reused_once_the_password_is_set(self, client, make_user):
         user = self._invited(make_user)
         token = self._token(user.id)
         payload = {
@@ -253,8 +241,7 @@ class TestSetPassword:
         again = client.post("/api/auth/set-password", json=payload)
         assert again.status_code == 400
         assert (
-            again.json()["detail"]
-            == "Password has already been set. Use change-password instead."
+            again.json()["detail"] == "Password has already been set. Use change-password instead."
         )
 
     def test_a_disabled_user_cannot_set_a_password(self, client, make_user):

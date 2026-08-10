@@ -35,7 +35,7 @@ from urllib.parse import urlparse  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import bindparam, text  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 
 ADMIN_EMAIL = "admin@dentalclinic.com"
@@ -57,9 +57,7 @@ def auth(token: str) -> dict:
 
 
 def login(client: TestClient, email: str, password: str) -> str:
-    resp = client.post(
-        "/api/auth/login", data={"username": email, "password": password}
-    )
+    resp = client.post("/api/auth/login", data={"username": email, "password": password})
     assert resp.status_code == 200, resp.text
     return resp.json()["access_token"]
 
@@ -105,10 +103,7 @@ def seeded_rows(client, engine):
     """Full snapshot of every row the startup seed created."""
     with engine.connect() as conn:
         return {
-            table: [
-                dict(row)
-                for row in conn.execute(text(f"SELECT * FROM {table}")).mappings()
-            ]
+            table: [dict(row) for row in conn.execute(text(f"SELECT * FROM {table}")).mappings()]
             for table in SEEDED_TABLES
         }
 

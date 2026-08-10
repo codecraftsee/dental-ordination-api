@@ -1,8 +1,9 @@
 from datetime import timedelta
-from typing import Optional
+
+from fastapi import HTTPException, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import HTTPException, status
+
 from app.config import get_settings
 from app.utils import utcnow
 
@@ -18,7 +19,7 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     if expires_delta:
         expire = utcnow() + expires_delta
@@ -37,7 +38,7 @@ def create_refresh_token(data: dict) -> str:
     return encoded_jwt
 
 
-def decode_token(token: str) -> Optional[dict]:
+def decode_token(token: str) -> dict | None:
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
         return payload
@@ -55,19 +56,15 @@ def verify_invite_token(token: str) -> str:
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except JWTError:
+        # `from None` deliberately, not `from err`: the JWT failure is the cause,
+        # but chaining it prints the raw token handling into the traceback, and
+        # the client is told nothing beyond "invalid or expired" either way.
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired invite link"
-        )
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired invite link"
+        ) from None
     if payload.get("type") != "set_password":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid invite link"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid invite link")
     user_id = payload.get("sub")
     if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid invite link"
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid invite link")
     return user_id

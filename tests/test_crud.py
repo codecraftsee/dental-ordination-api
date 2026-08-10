@@ -61,9 +61,7 @@ def test_patient_lifecycle(client, admin_token):
         ("/api/users", "User not found"),
     ],
 )
-def test_get_missing_resource_is_404_with_its_own_message(
-    client, admin_token, path, detail
-):
+def test_get_missing_resource_is_404_with_its_own_message(client, admin_token, path, detail):
     resp = client.get(f"{path}/{MISSING_ID}", headers=auth(admin_token))
     assert resp.status_code == 404
     assert resp.json()["detail"] == detail
@@ -79,9 +77,7 @@ def test_get_missing_resource_is_404_with_its_own_message(
         ("/api/users", "User not found"),
     ],
 )
-def test_delete_missing_resource_is_404_with_its_own_message(
-    client, admin_token, path, detail
-):
+def test_delete_missing_resource_is_404_with_its_own_message(client, admin_token, path, detail):
     resp = client.delete(f"{path}/{MISSING_ID}", headers=auth(admin_token))
     assert resp.status_code == 404
     assert resp.json()["detail"] == detail
@@ -101,9 +97,7 @@ def test_patient_search_and_city_filters(client, admin_token, patient):
 
 
 def test_dismiss_patient_import_warning(client, admin_token, patient):
-    resp = client.patch(
-        f"/api/patients/{patient['id']}/dismiss-warning", headers=auth(admin_token)
-    )
+    resp = client.patch(f"/api/patients/{patient['id']}/dismiss-warning", headers=auth(admin_token))
     assert resp.status_code == 200
     assert resp.json()["import_incomplete"] is False
 
@@ -135,13 +129,36 @@ def test_visit_lifecycle_and_embedded_doctor(client, admin_token, patient, docto
     assert fetched.status_code == 200
     assert fetched.json()["tooth_number"] == 16
 
-    updated = client.put(
-        f"/api/visits/{visit_id}", json={"paid": False}, headers=headers
-    )
+    updated = client.put(f"/api/visits/{visit_id}", json={"paid": False}, headers=headers)
     assert updated.status_code == 200
     assert updated.json()["paid"] is False
 
     assert client.delete(f"/api/visits/{visit_id}", headers=headers).status_code == 204
+
+
+def test_a_visit_date_can_actually_be_changed(client, admin_token, patient, doctor):
+    """Regression: VisitUpdate.date used to be annotated NoneType.
+
+    The field name shadowed the imported `date` type inside the class body, so
+    `Optional[date]` silently became `Optional[None]` and every real date was
+    rejected with a 422. Nothing caught it because the lifecycle test above only
+    ever updates `paid`.
+    """
+    headers = auth(admin_token)
+    visit_id = client.post(
+        "/api/visits",
+        json={"patient_id": patient["id"], "doctor_id": doctor.id, "date": "2024-03-01"},
+        headers=headers,
+    ).json()["id"]
+
+    updated = client.put(f"/api/visits/{visit_id}", json={"date": "2024-09-30"}, headers=headers)
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["date"] == "2024-09-30"
+
+    # and null is still rejected, since visits.date is NOT NULL
+    nulled = client.put(f"/api/visits/{visit_id}", json={"date": None}, headers=headers)
+    assert nulled.status_code == 400
+    assert nulled.json()["detail"] == "Field 'date' cannot be null"
 
 
 def test_visit_filters(client, admin_token, patient, doctor):
@@ -164,9 +181,7 @@ def test_visit_filters(client, admin_token, patient, doctor):
     )
     assert [v["date"] for v in ranged.json()] == ["2024-06-15"]
 
-    by_patient = client.get(
-        "/api/visits", params={"patient_id": patient["id"]}, headers=headers
-    )
+    by_patient = client.get("/api/visits", params={"patient_id": patient["id"]}, headers=headers)
     assert len(by_patient.json()) == 2
     # Newest first.
     assert by_patient.json()[0]["date"] == "2024-06-15"
@@ -196,9 +211,7 @@ def test_diagnosis_update_to_a_taken_code_is_rejected(client, admin_token):
         headers=headers,
     ).json()
 
-    resp = client.put(
-        f"/api/diagnoses/{second['id']}", json={"code": "T-200"}, headers=headers
-    )
+    resp = client.put(f"/api/diagnoses/{second['id']}", json={"code": "T-200"}, headers=headers)
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Diagnosis code already in use"
 
@@ -232,9 +245,7 @@ def test_treatment_update_to_a_taken_code_is_rejected(client, admin_token):
         headers=headers,
     ).json()
 
-    resp = client.put(
-        f"/api/treatments/{second['id']}", json={"code": "TX-901"}, headers=headers
-    )
+    resp = client.put(f"/api/treatments/{second['id']}", json={"code": "TX-901"}, headers=headers)
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Treatment code already in use"
 
@@ -242,14 +253,10 @@ def test_treatment_update_to_a_taken_code_is_rejected(client, admin_token):
 def test_category_filters(client, admin_token):
     headers = auth(admin_token)
 
-    caries = client.get(
-        "/api/diagnoses", params={"category": "Caries"}, headers=headers
-    ).json()
+    caries = client.get("/api/diagnoses", params={"category": "Caries"}, headers=headers).json()
     assert caries and all(d["category"] == "Caries" for d in caries)
 
-    endo = client.get(
-        "/api/treatments", params={"category": "Endodontic"}, headers=headers
-    ).json()
+    endo = client.get("/api/treatments", params={"category": "Endodontic"}, headers=headers).json()
     assert endo and all(t["category"] == "Endodontic" for t in endo)
 
 
@@ -336,9 +343,7 @@ class TestUserInvites:
         )
         assert resp.status_code == 401
 
-    def test_a_failing_email_does_not_fail_the_request(
-        self, client, admin_token, monkeypatch
-    ):
+    def test_a_failing_email_does_not_fail_the_request(self, client, admin_token, monkeypatch):
         """The user is still created; the invite link can be handed over manually."""
         from app.routers import users as users_router
 
@@ -370,26 +375,18 @@ class TestUserInvites:
         ).json()
         sent.clear()
 
-        resp = client.post(
-            f"/api/users/{created['id']}/resend-invite", headers=auth(admin_token)
-        )
+        resp = client.post(f"/api/users/{created['id']}/resend-invite", headers=auth(admin_token))
 
         assert resp.status_code == 204
         assert len(sent) == 1
 
     def test_resend_invite_for_an_unknown_user_is_404(self, client, admin_token, sent):
-        resp = client.post(
-            f"/api/users/{MISSING_ID}/resend-invite", headers=auth(admin_token)
-        )
+        resp = client.post(f"/api/users/{MISSING_ID}/resend-invite", headers=auth(admin_token))
         assert resp.status_code == 404
         assert resp.json()["detail"] == "User not found"
 
-    def test_resend_invite_after_the_password_is_set_is_400(
-        self, client, admin_token, nurse, sent
-    ):
-        resp = client.post(
-            f"/api/users/{nurse.id}/resend-invite", headers=auth(admin_token)
-        )
+    def test_resend_invite_after_the_password_is_set_is_400(self, client, admin_token, nurse, sent):
+        resp = client.post(f"/api/users/{nurse.id}/resend-invite", headers=auth(admin_token))
         assert resp.status_code == 400
         assert resp.json()["detail"] == "User has already set their password"
 
@@ -402,15 +399,11 @@ class TestExplicitNulls:
     """
 
     def test_nulling_a_required_user_field_is_400(self, client, admin_token, nurse):
-        resp = client.put(
-            f"/api/users/{nurse.id}", json={"role": None}, headers=auth(admin_token)
-        )
+        resp = client.put(f"/api/users/{nurse.id}", json={"role": None}, headers=auth(admin_token))
         assert resp.status_code == 400
         assert resp.json()["detail"] == "Field 'role' cannot be null"
 
-    def test_nulling_a_required_patient_field_is_400(
-        self, client, admin_token, patient
-    ):
+    def test_nulling_a_required_patient_field_is_400(self, client, admin_token, patient):
         resp = client.put(
             f"/api/patients/{patient['id']}",
             json={"first_name": None},
@@ -419,9 +412,7 @@ class TestExplicitNulls:
         assert resp.status_code == 400
         assert resp.json()["detail"] == "Field 'first_name' cannot be null"
 
-    def test_nulling_a_required_visit_field_is_400(
-        self, client, admin_token, patient, doctor
-    ):
+    def test_nulling_a_required_visit_field_is_400(self, client, admin_token, patient, doctor):
         visit = client.post(
             "/api/visits",
             json={"patient_id": patient["id"], "doctor_id": doctor.id, "date": "2024-03-01"},
@@ -444,9 +435,7 @@ class TestExplicitNulls:
         assert resp.status_code == 200
         assert resp.json()["phone"] is None
 
-    def test_a_rejected_update_leaves_the_row_untouched(
-        self, client, admin_token, patient
-    ):
+    def test_a_rejected_update_leaves_the_row_untouched(self, client, admin_token, patient):
         """Validation happens before any field is applied."""
         resp = client.put(
             f"/api/patients/{patient['id']}",
@@ -455,17 +444,13 @@ class TestExplicitNulls:
         )
         assert resp.status_code == 400
 
-        after = client.get(
-            f"/api/patients/{patient['id']}", headers=auth(admin_token)
-        ).json()
+        after = client.get(f"/api/patients/{patient['id']}", headers=auth(admin_token)).json()
         assert after["city"] == "Novi Sad"
         assert after["first_name"] == "Ana"
 
 
 class TestAdminBulkDelete:
-    def test_delete_all_patients_takes_their_visits_too(
-        self, client, admin_token, patient, doctor
-    ):
+    def test_delete_all_patients_takes_their_visits_too(self, client, admin_token, patient, doctor):
         headers = auth(admin_token)
         client.post(
             "/api/visits",
@@ -546,9 +531,7 @@ class TestAdminBulkDelete:
         assert after["treatment_id"] is None
         assert after["diagnosis_notes"] == "Caries d.16"
 
-    def test_delete_all_still_works_with_linked_visits(
-        self, client, admin_token, patient, doctor
-    ):
+    def test_delete_all_still_works_with_linked_visits(self, client, admin_token, patient, doctor):
         headers = auth(admin_token)
         self._visit_referencing_catalogue(client, headers, patient, doctor)
 
@@ -556,9 +539,7 @@ class TestAdminBulkDelete:
         assert resp.status_code == 200
         assert resp.json()["visits"] == 1
 
-    def test_delete_all_returns_a_count_per_resource(
-        self, client, admin_token, patient, doctor
-    ):
+    def test_delete_all_returns_a_count_per_resource(self, client, admin_token, patient, doctor):
         headers = auth(admin_token)
         client.post(
             "/api/visits",

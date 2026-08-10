@@ -5,12 +5,12 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import require_permission
-from app.permissions import Permission
+from app.models.diagnosis import Diagnosis
+from app.models.patient import Patient
+from app.models.treatment import Treatment
 from app.models.user import User
 from app.models.visit import Visit
-from app.models.patient import Patient
-from app.models.diagnosis import Diagnosis
-from app.models.treatment import Treatment
+from app.permissions import Permission
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 

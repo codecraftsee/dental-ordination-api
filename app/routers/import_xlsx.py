@@ -1,29 +1,30 @@
-import re
 import json
 import logging
 import random
-from io import BytesIO
+import re
+from collections.abc import Iterator
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Iterator, List, NamedTuple, Optional
+from io import BytesIO
+from typing import NamedTuple
 
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.dependencies import require_permission
-from app.permissions import Permission
+from app.models.patient import Gender, Patient
 from app.models.user import User, UserRole
-from app.models.patient import Patient, Gender
 from app.models.visit import Visit
+from app.permissions import Permission
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/import", tags=["import"])
 
-TOOTH_REGEX = re.compile(r'd\.?\s?(\d+)', re.IGNORECASE)
+TOOTH_REGEX = re.compile(r"d\.?\s?(\d+)", re.IGNORECASE)
 
 # Layout of a dental card: patient details sit in column C (index 2) of rows
 # 3-11, and the visit table starts at row 15.
@@ -32,12 +33,11 @@ FIRST_VISIT_ROW = 14
 MIN_ROWS = 14
 
 
-
 def parse_date(value) -> date | None:
     """Parse 'dd.mm.yyyy.' format to date object."""
     if not value or not isinstance(value, str):
         return None
-    cleaned = value.strip().rstrip('.')
+    cleaned = value.strip().rstrip(".")
     try:
         return datetime.strptime(cleaned, "%d.%m.%Y").date()
     except ValueError:
@@ -50,9 +50,9 @@ def parse_gender(value) -> Gender | None:
         return None
     v = str(value).strip().lower()
     logger.debug("parse_gender: raw=%r, normalized=%r", value, v)
-    if v == 'm':
+    if v == "m":
         return Gender.MALE
-    if v in ('z', 'ž'):
+    if v in ("z", "ž"):
         return Gender.FEMALE
     return None
 
@@ -74,7 +74,7 @@ def parse_price(row: list, price_idx: int = 6, fallback_idx: int = 7) -> Decimal
         if idx < len(row) and row[idx] is not None:
             raw = str(row[idx]).strip()
             # Remove currency suffix (e.g. "Din.", "din", "RSD")
-            raw = re.sub(r'[A-Za-z.]+$', '', raw).strip()
+            raw = re.sub(r"[A-Za-z.]+$", "", raw).strip()
             if not raw:
                 continue
             # Determine format by looking at last separator
@@ -82,17 +82,17 @@ def parse_price(row: list, price_idx: int = 6, fallback_idx: int = 7) -> Decimal
             # "4,000.00" -> US (comma=thousands, dot=decimal)
             # "4000,00"  -> European no thousands sep
             # "4000.00"  -> US no thousands sep
-            last_dot = raw.rfind('.')
-            last_comma = raw.rfind(',')
+            last_dot = raw.rfind(".")
+            last_comma = raw.rfind(",")
             if last_comma > last_dot:
                 # European: dots are thousands, comma is decimal
-                raw = raw.replace('.', '').replace(',', '.')
+                raw = raw.replace(".", "").replace(",", ".")
             elif last_dot > last_comma:
                 # US: commas are thousands, dot is decimal
-                raw = raw.replace(',', '')
+                raw = raw.replace(",", "")
             else:
                 # No separators or only one type — try as-is
-                raw = raw.replace(',', '.')
+                raw = raw.replace(",", ".")
             try:
                 return Decimal(raw)
             except (InvalidOperation, ValueError):
@@ -122,7 +122,6 @@ def _empty_counts() -> dict:
         "patients_incomplete": 0,
         "visits_incomplete": 0,
     }
-
 
 
 class DoctorIndex(NamedTuple):
@@ -160,10 +159,10 @@ def _load_doctor_index() -> DoctorIndex:
 
 
 def _resolve_doctor(
-    override_doctor_id: Optional[str],
-    doctor_initial: Optional[str],
+    override_doctor_id: str | None,
+    doctor_initial: str | None,
     doctors: DoctorIndex,
-) -> Optional[str]:
+) -> str | None:
     """A caller-supplied doctor wins, then an initial match, then any doctor."""
     if override_doctor_id:
         return override_doctor_id
@@ -174,21 +173,19 @@ def _resolve_doctor(
     return random.choice(doctors.ids) if doctors.ids else None
 
 
-
 class PatientHeader(NamedTuple):
     fields: dict
     incomplete: bool
 
 
-def _parse_patient_header(
-    rows: list, filename: str, errors: list[str]
-) -> Optional[PatientHeader]:
+def _parse_patient_header(rows: list, filename: str, errors: list[str]) -> PatientHeader | None:
     """Read the patient block. Returns None when the name is unusable.
 
     Unreadable gender and date-of-birth are not fatal: the card is imported
     with a documented default and flagged `import_incomplete` so somebody can
     fix it in the UI later.
     """
+
     def cell(row_idx: int):
         row = rows[row_idx]
         return row[PATIENT_COLUMN] if len(row) > PATIENT_COLUMN else None
@@ -241,11 +238,11 @@ def _parse_patient_header(
 class VisitRow(NamedTuple):
     row_number: int
     visit_date: date
-    diagnosis_notes: Optional[str]
-    treatment_notes: Optional[str]
-    doctor_initial: Optional[str]
-    tooth_number: Optional[int]
-    price: Optional[Decimal]
+    diagnosis_notes: str | None
+    treatment_notes: str | None
+    doctor_initial: str | None
+    tooth_number: int | None
+    price: Decimal | None
 
 
 def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
@@ -255,7 +252,7 @@ def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
     the row above". Rows before the first date, and rows with neither a
     diagnosis nor a treatment, are skipped silently.
     """
-    current_date: Optional[date] = None
+    current_date: date | None = None
 
     for row_idx in range(FIRST_VISIT_ROW, len(rows)):
         row = rows[row_idx]
@@ -292,13 +289,12 @@ def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
         )
 
 
-
 def _import_workbook(
     db: Session,
     filename: str,
     content: bytes,
     doctors: DoctorIndex,
-    override_doctor_id: Optional[str],
+    override_doctor_id: str | None,
     counts: dict,
     errors: list[str],
 ) -> None:
@@ -342,13 +338,9 @@ def _import_workbook(
             counts["patients_incomplete"] += 1
 
     for visit_row in _iter_visit_rows(rows):
-        doctor_id = _resolve_doctor(
-            override_doctor_id, visit_row.doctor_initial, doctors
-        )
+        doctor_id = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
         if not doctor_id:
-            errors.append(
-                f"{filename} row {visit_row.row_number}: No doctors in system, skipping"
-            )
+            errors.append(f"{filename} row {visit_row.row_number}: No doctors in system, skipping")
             continue
 
         already_imported = (
@@ -383,7 +375,7 @@ def _import_workbook(
             counts["visits_incomplete"] += 1
 
 
-def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
+def _validate_override_doctor(doctor_id: str | None) -> str | None:
     """Check a caller-supplied doctor_id before the response starts streaming.
 
     Once the StreamingResponse begins, the status code is already sent — so a
@@ -393,11 +385,7 @@ def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
         return None
     db = SessionLocal()
     try:
-        doctor = (
-            db.query(User)
-            .filter(User.id == doctor_id, User.role == UserRole.DOCTOR)
-            .first()
-        )
+        doctor = db.query(User).filter(User.id == doctor_id, User.role == UserRole.DOCTOR).first()
         if not doctor:
             raise HTTPException(
                 status_code=400,
@@ -408,12 +396,15 @@ def _validate_override_doctor(doctor_id: Optional[str]) -> Optional[str]:
         db.close()
 
 
-
 @router.post("/xlsx")
 async def import_xlsx_files(
-    files: List[UploadFile] = File(...),
-    doctor_id: Optional[str] = Form(None),
-    current_user: User = Depends(require_permission(Permission.ADMIN_IMPORT)),
+    files: list[UploadFile] = File(...),
+    doctor_id: str | None = Form(None),
+    # Named `_` like every other router: the value is never read, but the
+    # dependency is what makes this endpoint admin-only. Deleting it because a
+    # linter calls the argument unused would open patient-data import to every
+    # role. Covered by tests/test_permissions.py.
+    _: User = Depends(require_permission(Permission.ADMIN_IMPORT)),
 ):
     """Import one or more XLSX dental card files, streaming progress via SSE.
 
@@ -447,13 +438,15 @@ async def import_xlsx_files(
             doctors = _load_doctor_index()
 
             for i, (filename, content) in enumerate(file_data):
-                yield _sse({
-                    "type": "progress",
-                    "current": i + 1,
-                    "total": total,
-                    "file": filename,
-                    "status": "processing",
-                })
+                yield _sse(
+                    {
+                        "type": "progress",
+                        "current": i + 1,
+                        "total": total,
+                        "file": filename,
+                        "status": "processing",
+                    }
+                )
 
                 file_errors: list[str] = []
                 file_counts = _empty_counts()
@@ -487,14 +480,16 @@ async def import_xlsx_files(
                 summary["errors"].extend(file_errors)
                 summary["files_processed"] += 1
 
-                yield _sse({
-                    "type": "file_done",
-                    "current": i + 1,
-                    "total": total,
-                    "file": filename,
-                    **file_counts,
-                    "errors": file_errors,
-                })
+                yield _sse(
+                    {
+                        "type": "file_done",
+                        "current": i + 1,
+                        "total": total,
+                        "file": filename,
+                        **file_counts,
+                        "errors": file_errors,
+                    }
+                )
 
             yield _sse({"type": "complete", "summary": summary})
 

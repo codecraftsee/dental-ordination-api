@@ -1,6 +1,7 @@
+from functools import lru_cache
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from functools import lru_cache
 
 # Kept as a named constant so the guard below can recognise it. Any deployment
 # still carrying this value is signing JWTs with a string that is public in the

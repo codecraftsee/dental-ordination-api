@@ -1,26 +1,24 @@
-from typing import Annotated, List, Optional
-from fastapi import APIRouter, Depends, status, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
+
 from app.database import get_db
-from app.models.user import User
+from app.db_helpers import apply_update, ensure_code_available, get_or_404
+from app.dependencies import require_permission
 from app.models.diagnosis import Diagnosis, DiagnosisCategory
-from app.schemas.diagnosis import DiagnosisCreate, DiagnosisUpdate, DiagnosisResponse
-from app.dependencies import (
-    apply_update,
-    ensure_code_available,
-    get_or_404,
-    require_permission,
-)
+from app.models.user import User
 from app.permissions import Permission
+from app.schemas.diagnosis import DiagnosisCreate, DiagnosisResponse, DiagnosisUpdate
 
 router = APIRouter(prefix="/api/diagnoses", tags=["diagnoses"])
 
 
-@router.get("", response_model=List[DiagnosisResponse])
+@router.get("", response_model=list[DiagnosisResponse])
 def list_diagnoses(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_READ))],
-    category: Optional[DiagnosisCategory] = Query(None)
+    category: DiagnosisCategory | None = Query(None),
 ):
     query = db.query(Diagnosis)
 
@@ -34,11 +32,9 @@ def list_diagnoses(
 def create_diagnosis(
     diagnosis_data: DiagnosisCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_CREATE))],
 ):
-    ensure_code_available(
-        db, Diagnosis, diagnosis_data.code, "Diagnosis code already exists"
-    )
+    ensure_code_available(db, Diagnosis, diagnosis_data.code, "Diagnosis code already exists")
 
     diagnosis = Diagnosis(**diagnosis_data.model_dump())
     db.add(diagnosis)
@@ -51,7 +47,7 @@ def create_diagnosis(
 def get_diagnosis(
     diagnosis_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_READ))]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_READ))],
 ):
     return get_or_404(db, Diagnosis, diagnosis_id, "Diagnosis")
 
@@ -61,7 +57,7 @@ def update_diagnosis(
     diagnosis_id: str,
     diagnosis_data: DiagnosisUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_UPDATE))]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_UPDATE))],
 ):
     diagnosis = get_or_404(db, Diagnosis, diagnosis_id, "Diagnosis")
 
@@ -86,7 +82,7 @@ def update_diagnosis(
 def delete_diagnosis(
     diagnosis_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_DELETE))]
+    _: Annotated[User, Depends(require_permission(Permission.DIAGNOSES_DELETE))],
 ):
     diagnosis = get_or_404(db, Diagnosis, diagnosis_id, "Diagnosis")
     db.delete(diagnosis)

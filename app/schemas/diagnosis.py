@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import Optional
 from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict
+
 from app.models.diagnosis import DiagnosisCategory
 
 
@@ -9,7 +10,7 @@ class DiagnosisBase(BaseModel):
     code: str
     name: str
     category: DiagnosisCategory
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class DiagnosisCreate(DiagnosisBase):
@@ -17,10 +18,10 @@ class DiagnosisCreate(DiagnosisBase):
 
 
 class DiagnosisUpdate(BaseModel):
-    code: Optional[str] = None
-    name: Optional[str] = None
-    category: Optional[DiagnosisCategory] = None
-    description: Optional[str] = None
+    code: str | None = None
+    name: str | None = None
+    category: DiagnosisCategory | None = None
+    description: str | None = None
 
 
 class DiagnosisResponse(DiagnosisBase):

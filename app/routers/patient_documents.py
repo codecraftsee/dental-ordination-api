@@ -1,13 +1,14 @@
 import logging
 import re
 import uuid
-from typing import Annotated, List, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_or_404, require_permission
+from app.db_helpers import get_or_404
+from app.dependencies import require_permission
 from app.models.patient import Patient
 from app.models.patient_document import PatientDocument
 from app.models.user import User
@@ -22,12 +23,14 @@ router = APIRouter(prefix="/api/patients/{patient_id}/documents", tags=["patient
 MAX_SIZE_BYTES = 25 * 1024 * 1024
 MAX_FILENAME_LENGTH = 255
 MAX_DESCRIPTION_LENGTH = 500
-ALLOWED_CONTENT_TYPES = frozenset({
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "application/pdf",
-})
+ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "application/pdf",
+    }
+)
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -41,7 +44,7 @@ def _validate_upload(
     content_type: str,
     size: int,
     filename: str,
-    description: Optional[str],
+    description: str | None,
 ) -> None:
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -84,9 +87,7 @@ def _to_response(doc: PatientDocument) -> PatientDocumentResponse:
     )
 
 
-def _get_document_or_404(
-    db: Session, patient_id: str, document_id: str
-) -> PatientDocument:
+def _get_document_or_404(db: Session, patient_id: str, document_id: str) -> PatientDocument:
     """Look a document up *within* its patient, so ids from another patient 404."""
     doc = (
         db.query(PatientDocument)
@@ -104,7 +105,7 @@ def _get_document_or_404(
     return doc
 
 
-@router.get("", response_model=List[PatientDocumentResponse])
+@router.get("", response_model=list[PatientDocumentResponse])
 def list_documents(
     patient_id: str,
     db: Annotated[Session, Depends(get_db)],
@@ -126,7 +127,7 @@ async def upload_document(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(require_permission(Permission.PATIENT_DOCUMENTS_CREATE))],
     file: UploadFile = File(...),
-    description: Optional[str] = Form(None),
+    description: str | None = Form(None),
 ):
     get_or_404(db, Patient, patient_id, "Patient")
 

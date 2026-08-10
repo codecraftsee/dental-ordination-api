@@ -7,11 +7,43 @@
 - **Auth**: JWT (access + refresh tokens) via python-jose, bcrypt via passlib
 - **Validation**: Pydantic v2
 - **Server**: Uvicorn with --reload for dev
+- **Lint/format**: ruff, configured in `pyproject.toml`
 
 ## Start Server
 ```bash
-venv/Scripts/uvicorn.exe app.main:app --reload
+venv/bin/uvicorn app.main:app --reload            # macOS / Linux
+venv\Scripts\uvicorn.exe app.main:app --reload    # Windows
 ```
+
+## Lint and Format
+```bash
+venv/bin/ruff check app tests        # lint
+venv/bin/ruff format app tests       # format
+```
+
+Rules are `E`, `F`, `I`, `B`, `UP` at line-length 100. The exclusions are all in
+`pyproject.toml` with their reasoning; do not drop any of them while
+"tidying" the config:
+
+- `B008` is neutralised via `extend-immutable-calls`. A function call in an
+  argument default is FastAPI's dependency-injection mechanism, not the bug the
+  rule is looking for.
+- `ARG` and `ERA` are **not** enabled. They produced 37 findings and none were
+  actionable — pytest fixture parameters that force setup ordering, FastAPI's
+  mandated `lifespan(app)` signature, and `# Nurse: read-only` reported as
+  commented-out code. Worst case was `import_xlsx.py`'s permission dependency,
+  reported as an unused argument while being the only thing keeping that
+  endpoint admin-only.
+- `UP042` is ignored. It rewrites `class UserRole(str, Enum)` into `StrEnum`,
+  which changes what `str()` and f-strings produce — `"UserRole.ADMIN"` against
+  `"ADMIN"`. These enums reach the API through Pydantic and the database through
+  SQLAlchemy. Nothing stringifies them bare today, which is why the change would
+  pass the suite and surface later.
+- `UP047` is ignored: PEP 695 generics instead of the `ModelT` TypeVar, no
+  autofix, a style preference.
+- `E501` is ignored. The formatter owns line length and wraps everything it can;
+  what remains are string literals it cannot split, so leaving the rule on made
+  `ruff check` and `ruff format` permanently disagree.
 
 ## Tests
 Tests run against **real PostgreSQL**, never SQLite — same engine as production.
@@ -105,10 +137,15 @@ Documented here so nobody assumes these already work.
     current way to cut someone off.
 
 ## Key Files
-- `app/main.py` — app entry point, startup seeds admin + diagnoses + treatments
+- `app/main.py` — app entry point, CORS, routers, and `run_startup_migrations()`
+- `app/seeds.py` — the default admin plus the diagnosis/treatment catalogues,
+  called by `run_startup_migrations()`
 - `app/config.py` — settings via pydantic-settings, reads `.env`
 - `app/database.py` — SQLAlchemy engine/session
-- `app/dependencies.py` — auth dependencies (get_current_user, require_admin, etc.)
+- `app/dependencies.py` — auth dependencies only: `get_current_user`,
+  `require_permission`, `oauth2_scheme`. Everything here is for `Depends()`
+- `app/db_helpers.py` — row helpers the route bodies call directly:
+  `get_or_404`, `apply_update`, `ensure_code_available`
 - `app/routers/` — one file per resource
 - `app/models/` — SQLAlchemy models
 - `app/schemas/` — Pydantic request/response schemas
@@ -116,12 +153,22 @@ Documented here so nobody assumes these already work.
 
 ## Default Admin
 - Email: `admin@dentalclinic.com`
-- Password: `Test123#` (seeded on first startup if the user doesn't exist — see `app/main.py:230`)
+- Password: `Test123#` (seeded on first startup if the user doesn't exist — see
+  `run_startup_migrations()` in `app/main.py`)
 
 ## Environment Variables (.env)
+
+`SECRET_KEY` below is the built-in default **verbatim**, and that is deliberate:
+`app/config.py` recognises this exact string and refuses to boot whenever
+`APP_ENV` is anything other than `local`. Do not "improve" it into a different
+placeholder — a value the guard does not recognise lets a deployed instance
+start while signing JWTs with a key that is public in this repository. Generate
+a real one with `python3 -c "import secrets; print(secrets.token_urlsafe(64))"`.
+
 ```
+APP_ENV=local
 DATABASE_URL=postgresql://postgres:password@localhost:5432/dental_ordination
-SECRET_KEY=your-secret-key
+SECRET_KEY=your-super-secret-key-change-in-production
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
@@ -131,10 +178,16 @@ FRONTEND_URL=http://localhost:4200
 
 ## Known Issues & Fixes
 - **passlib + bcrypt 5.x incompatibility**: pin `bcrypt<4.1` in requirements.txt
-- **Vestigial SQLite support**: `app/main.py` still carries `if is_postgres: … else:`
-  branches (a table-rebuild path, an enum-value update, an FK skip) from when local
-  dev used SQLite. Nothing runs on SQLite any more; this code is queued for removal
-  along with the startup migrations.
+- **Startup migrations still run on every boot**: `run_startup_migrations()` in
+  `app/main.py` re-executes its PostgreSQL DDL against the live database at every
+  start (`DROP TABLE staff_profiles`, `DROP TABLE doctors`, `ALTER ... DROP NOT
+  NULL`, an enum rename). The dead SQLite branches are gone. Retiring the rest
+  means setting up alembic — it is pinned in `requirements.txt` but there is no
+  `alembic/` directory — and stamping the current schema as a baseline first.
+- **`specs/` is gitignored and must stay that way**: it held four real patient
+  dental cards, committed 2026-02-07 and untracked on 2026-08-10. They are still
+  present in git history; removing them from past commits needs `git-filter-repo`
+  and a force-push, which was deliberately deferred. Never commit patient data.
 
 ## CORS Allowed Origins
 Driven by the `ALLOWED_ORIGINS` env var (comma-separated). The default is
