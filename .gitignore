@@ -20,6 +20,12 @@ ENV/
 # Local Docker smoke test — stand-in for the Angular bundle
 www-local/
 
+# Real patient dental cards, used for manual import testing. These hold names,
+# dates of birth, addresses and phone numbers, so they must never be committed.
+# Anchored to the repo root so it cannot swallow `openspec/specs/`, which is
+# tracked documentation and unrelated despite the name.
+/specs/
+
 # IDE
 .idea/
 .vscode/
