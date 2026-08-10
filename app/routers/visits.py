@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.dependencies import apply_update, get_or_404, require_permission
+from app.db_helpers import apply_update, get_or_404
+from app.dependencies import require_permission
 from app.models.user import User
 from app.models.visit import Visit
 from app.permissions import Permission

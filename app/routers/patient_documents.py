@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_or_404, require_permission
+from app.db_helpers import get_or_404
+from app.dependencies import require_permission
 from app.models.patient import Patient
 from app.models.patient_document import PatientDocument
 from app.models.user import User

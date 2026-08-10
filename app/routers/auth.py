@@ -5,7 +5,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import get_current_user, get_or_404
+from app.db_helpers import get_or_404
+from app.dependencies import get_current_user
 from app.models.user import User
 from app.permissions import get_permissions_for_role
 from app.schemas.auth import (

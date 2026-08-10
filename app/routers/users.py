@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.dependencies import apply_update, get_or_404, require_permission
+from app.db_helpers import apply_update, get_or_404
+from app.dependencies import require_permission
 from app.models.user import User, UserRole
 from app.permissions import Permission
 from app.schemas.user import UserCreate, UserResponse, UserUpdate, to_user_response
