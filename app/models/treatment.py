@@ -1,8 +1,10 @@
 import uuid
-from app.utils import utcnow
 from enum import Enum as PyEnum
-from sqlalchemy import Column, String, Text, DateTime, Enum, Numeric
+
+from sqlalchemy import Column, DateTime, Enum, Numeric, String, Text
+
 from app.database import Base
+from app.utils import utcnow
 
 
 class TreatmentCategory(str, PyEnum):

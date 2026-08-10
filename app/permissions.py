@@ -1,4 +1,5 @@
 from enum import Enum as PyEnum
+
 from app.models.user import UserRole
 
 

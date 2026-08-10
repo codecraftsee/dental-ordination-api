@@ -1,26 +1,28 @@
 from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+
 from app.database import get_db
+from app.dependencies import get_current_user, get_or_404
 from app.models.user import User
+from app.permissions import get_permissions_for_role
 from app.schemas.auth import (
-    TokenResponse,
-    RefreshRequest,
     ChangePasswordRequest,
+    RefreshRequest,
     SetPasswordRequest,
+    TokenResponse,
 )
 from app.schemas.user import UserResponse, to_user_response
 from app.services.auth import (
-    verify_password,
-    get_password_hash,
     create_access_token,
     create_refresh_token,
     decode_token,
+    get_password_hash,
     verify_invite_token,
+    verify_password,
 )
-from app.dependencies import get_current_user, get_or_404
-from app.permissions import get_permissions_for_role
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 

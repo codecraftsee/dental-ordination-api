@@ -1,12 +1,14 @@
 from typing import Annotated, List, Optional
-from fastapi import APIRouter, Depends, status, Query
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
+
 from app.database import get_db
-from app.models.user import User
-from app.models.patient import Patient
-from app.schemas.patient import PatientCreate, PatientUpdate, PatientResponse
 from app.dependencies import apply_update, get_or_404, require_permission
+from app.models.patient import Patient
+from app.models.user import User
 from app.permissions import Permission
+from app.schemas.patient import PatientCreate, PatientResponse, PatientUpdate
 
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 

@@ -35,7 +35,7 @@ from urllib.parse import urlparse  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import bindparam, text  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 from sqlalchemy.exc import OperationalError  # noqa: E402
 
 ADMIN_EMAIL = "admin@dentalclinic.com"

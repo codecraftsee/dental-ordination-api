@@ -1,9 +1,11 @@
 import uuid
-from app.utils import utcnow
 from enum import Enum as PyEnum
-from sqlalchemy import Column, String, Date, DateTime, Enum, ForeignKey, Boolean
+
+from sqlalchemy import Boolean, Column, Date, DateTime, Enum, ForeignKey, String
 from sqlalchemy.orm import relationship
+
 from app.database import Base
+from app.utils import utcnow
 
 
 class Gender(str, PyEnum):

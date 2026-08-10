@@ -1,8 +1,10 @@
 import uuid
-from app.utils import utcnow
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey
+
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
+
 from app.database import Base
+from app.utils import utcnow
 
 
 class PatientDocument(Base):

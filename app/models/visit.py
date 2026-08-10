@@ -1,8 +1,10 @@
 import uuid
-from app.utils import utcnow
-from sqlalchemy import Column, String, Text, Date, DateTime, Integer, Numeric, Boolean, ForeignKey
+
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import relationship
+
 from app.database import Base
+from app.utils import utcnow
 
 
 class Visit(Base):

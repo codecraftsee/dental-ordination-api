@@ -1,8 +1,10 @@
 from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict, EmailStr
-from app.models.user import UserRole, Specialization
+
+from app.models.user import Specialization, UserRole
 
 
 class UserCreate(BaseModel):

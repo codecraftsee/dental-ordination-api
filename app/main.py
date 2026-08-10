@@ -1,30 +1,31 @@
 import logging
 from contextlib import asynccontextmanager
 
+import sqlalchemy
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import (
-    auth,
-    users,
-    patients,
-    diagnoses,
-    treatments,
-    visits,
-    import_xlsx,
-    admin,
-    patient_documents,
-)
-from app.database import engine, Base
+from sqlalchemy import inspect
+from sqlalchemy.orm import Session
+
 from app.config import get_settings
+from app.database import Base, engine
 from app.models import User
 from app.models.diagnosis import Diagnosis, DiagnosisCategory
 from app.models.treatment import Treatment, TreatmentCategory
-from app.services.auth import get_password_hash
 from app.models.user import UserRole
-from sqlalchemy.orm import Session
-import sqlalchemy
-from sqlalchemy import inspect
+from app.routers import (
+    admin,
+    auth,
+    diagnoses,
+    import_xlsx,
+    patient_documents,
+    patients,
+    treatments,
+    users,
+    visits,
+)
+from app.services.auth import get_password_hash
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

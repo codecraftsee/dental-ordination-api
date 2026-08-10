@@ -1,17 +1,19 @@
 from typing import Annotated, List, Optional
-from fastapi import APIRouter, Depends, status, Query
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
+
 from app.database import get_db
-from app.models.user import User
-from app.models.treatment import Treatment, TreatmentCategory
-from app.schemas.treatment import TreatmentCreate, TreatmentUpdate, TreatmentResponse
 from app.dependencies import (
     apply_update,
     ensure_code_available,
     get_or_404,
     require_permission,
 )
+from app.models.treatment import Treatment, TreatmentCategory
+from app.models.user import User
 from app.permissions import Permission
+from app.schemas.treatment import TreatmentCreate, TreatmentResponse, TreatmentUpdate
 
 router = APIRouter(prefix="/api/treatments", tags=["treatments"])
 

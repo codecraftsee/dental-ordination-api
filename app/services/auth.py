@@ -1,8 +1,10 @@
 from datetime import timedelta
 from typing import Optional
+
+from fastapi import HTTPException, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import HTTPException, status
+
 from app.config import get_settings
 from app.utils import utcnow
 

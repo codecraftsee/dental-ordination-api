@@ -1,15 +1,17 @@
 import logging
 from typing import Annotated, List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+
+from app.config import get_settings
 from app.database import get_db
+from app.dependencies import apply_update, get_or_404, require_permission
 from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, to_user_response
+from app.permissions import Permission
+from app.schemas.user import UserCreate, UserResponse, UserUpdate, to_user_response
 from app.services.auth import create_invite_token
 from app.services.email import send_invite_email
-from app.dependencies import apply_update, get_or_404, require_permission
-from app.permissions import Permission
-from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 

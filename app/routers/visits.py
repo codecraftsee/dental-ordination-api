@@ -1,13 +1,15 @@
-from typing import Annotated, List, Optional
 from datetime import date
-from fastapi import APIRouter, Depends, status, Query
+from typing import Annotated, List, Optional
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session, joinedload
+
 from app.database import get_db
+from app.dependencies import apply_update, get_or_404, require_permission
 from app.models.user import User
 from app.models.visit import Visit
-from app.schemas.visit import VisitCreate, VisitUpdate, VisitResponse
-from app.dependencies import apply_update, get_or_404, require_permission
 from app.permissions import Permission
+from app.schemas.visit import VisitCreate, VisitResponse, VisitUpdate
 
 router = APIRouter(prefix="/api/visits", tags=["visits"])
 
