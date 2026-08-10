@@ -26,6 +26,11 @@ www-local/
 *.swp
 *.swo
 
+# Claude Code per-developer settings. `.claude/settings.json` is the shared
+# file if we ever want one; `settings.local.json` is personal and holds
+# machine-specific paths and permission grants.
+.claude/settings.local.json
+
 # Testing
 .pytest_cache/
 .coverage

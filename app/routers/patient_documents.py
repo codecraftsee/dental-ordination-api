@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies import require_permission
+from app.dependencies import get_or_404, require_permission
 from app.models.patient import Patient
 from app.models.patient_document import PatientDocument
 from app.models.user import User
@@ -84,14 +84,24 @@ def _to_response(doc: PatientDocument) -> PatientDocumentResponse:
     )
 
 
-def _get_patient_or_404(db: Session, patient_id: str) -> Patient:
-    patient = db.query(Patient).filter(Patient.id == patient_id).first()
-    if not patient:
+def _get_document_or_404(
+    db: Session, patient_id: str, document_id: str
+) -> PatientDocument:
+    """Look a document up *within* its patient, so ids from another patient 404."""
+    doc = (
+        db.query(PatientDocument)
+        .filter(
+            PatientDocument.id == document_id,
+            PatientDocument.patient_id == patient_id,
+        )
+        .first()
+    )
+    if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Patient not found",
+            detail="Document not found",
         )
-    return patient
+    return doc
 
 
 @router.get("", response_model=List[PatientDocumentResponse])
@@ -100,7 +110,7 @@ def list_documents(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.PATIENT_DOCUMENTS_READ))],
 ):
-    _get_patient_or_404(db, patient_id)
+    get_or_404(db, Patient, patient_id, "Patient")
     docs = (
         db.query(PatientDocument)
         .filter(PatientDocument.patient_id == patient_id)
@@ -118,7 +128,7 @@ async def upload_document(
     file: UploadFile = File(...),
     description: Optional[str] = Form(None),
 ):
-    _get_patient_or_404(db, patient_id)
+    get_or_404(db, Patient, patient_id, "Patient")
 
     content_type = (file.content_type or "").lower()
     data = await file.read()
@@ -163,21 +173,8 @@ def get_document(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.PATIENT_DOCUMENTS_READ))],
 ):
-    _get_patient_or_404(db, patient_id)
-    doc = (
-        db.query(PatientDocument)
-        .filter(
-            PatientDocument.id == document_id,
-            PatientDocument.patient_id == patient_id,
-        )
-        .first()
-    )
-    if not doc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found",
-        )
-    return _to_response(doc)
+    get_or_404(db, Patient, patient_id, "Patient")
+    return _to_response(_get_document_or_404(db, patient_id, document_id))
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -187,20 +184,8 @@ def delete_document(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.PATIENT_DOCUMENTS_DELETE))],
 ):
-    _get_patient_or_404(db, patient_id)
-    doc = (
-        db.query(PatientDocument)
-        .filter(
-            PatientDocument.id == document_id,
-            PatientDocument.patient_id == patient_id,
-        )
-        .first()
-    )
-    if not doc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found",
-        )
+    get_or_404(db, Patient, patient_id, "Patient")
+    doc = _get_document_or_404(db, patient_id, document_id)
 
     storage.delete(doc.storage_path)
     db.delete(doc)

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from app.utils import utcnow
 from enum import Enum as PyEnum
 from sqlalchemy import Column, String, Text, DateTime, Enum, Numeric
 from app.database import Base
@@ -24,4 +24,4 @@ class Treatment(Base):
     category = Column(Enum(TreatmentCategory), nullable=False)
     description = Column(Text, nullable=True)
     default_price = Column(Numeric(10, 2), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)

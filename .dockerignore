@@ -32,7 +32,9 @@ specs/
 openspec/
 README.md
 CLAUDE.md
-Procfile
 Dockerfile
 docker-compose.yml
+docker-compose.test.yml
 Caddyfile
+pytest.ini
+tests/

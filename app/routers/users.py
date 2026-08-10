@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, UserRole
-from app.schemas.user import UserCreate, UserUpdate, UserResponse
+from app.schemas.user import UserCreate, UserUpdate, UserResponse, to_user_response
 from app.services.auth import create_invite_token
 from app.services.email import send_invite_email
-from app.dependencies import require_permission
+from app.dependencies import apply_update, get_or_404, require_permission
 from app.permissions import Permission
 from app.config import get_settings
 
@@ -16,21 +16,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
-def _to_response(user: User) -> UserResponse:
-    return UserResponse(
-        id=user.id,
-        email=user.email,
-        role=user.role,
-        is_active=user.is_active,
-        must_set_password=user.must_set_password,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        phone=user.phone,
-        specialization=user.specialization,
-        license_number=user.license_number,
-        created_at=user.created_at,
-        updated_at=user.updated_at,
+def _assert_not_last_active_admin(db: Session, user: User) -> None:
+    """Refuse a change that would leave nobody able to administer the system.
+
+    Deleting a user is a soft delete, and the startup seed only recreates
+    admin@dentalclinic.com when no row with that email exists — so losing the
+    last admin is not self-healing. Recovery would need direct database access.
+    """
+    if user.role != UserRole.ADMIN or not user.is_active:
+        return
+    other_admins = (
+        db.query(User)
+        .filter(
+            User.role == UserRole.ADMIN,
+            User.is_active == True,  # noqa: E712 — SQL comparison, not a Python bool test
+            User.id != user.id,
+        )
+        .count()
     )
+    if other_admins == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot remove the last active admin",
+        )
 
 
 @router.get("", response_model=List[UserResponse])
@@ -44,7 +52,7 @@ def list_users(
         query = query.filter(User.role != UserRole.ADMIN)
     if role:
         query = query.filter(User.role == role)
-    return [_to_response(u) for u in query.all()]
+    return [to_user_response(u) for u in query.all()]
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -78,7 +86,7 @@ def create_user(
     except Exception as exc:
         logger.error("Failed to send invite email to %s: %s", user.email, exc)
 
-    return _to_response(user)
+    return to_user_response(user)
 
 
 @router.post("/{user_id}/resend-invite", status_code=status.HTTP_204_NO_CONTENT)
@@ -87,9 +95,7 @@ def resend_invite(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.USERS_CREATE))]
 ):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    user = get_or_404(db, User, user_id, "User")
     if not user.must_set_password:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User has already set their password")
 
@@ -109,10 +115,7 @@ def get_user(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.USERS_READ))]
 ):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    return _to_response(user)
+    return to_user_response(get_or_404(db, User, user_id, "User"))
 
 
 @router.put("/{user_id}", response_model=UserResponse)
@@ -120,11 +123,9 @@ def update_user(
     user_id: str,
     data: UserUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_UPDATE))]
 ):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    user = get_or_404(db, User, user_id, "User")
 
     update = data.model_dump(exclude_unset=True)
 
@@ -132,22 +133,35 @@ def update_user(
         if db.query(User).filter(User.email == update["email"], User.id != user_id).first():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already in use")
 
-    for key, value in update.items():
-        setattr(user, key, value)
+    deactivating = update.get("is_active") is False
+    demoting = "role" in update and update["role"] != UserRole.ADMIN
 
+    if deactivating and user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account",
+        )
+    if deactivating or demoting:
+        _assert_not_last_active_admin(db, user)
+
+    apply_update(user, update)
     db.commit()
     db.refresh(user)
-    return _to_response(user)
+    return to_user_response(user)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(
     user_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))]
+    current_user: Annotated[User, Depends(require_permission(Permission.USERS_DELETE))]
 ):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    user = get_or_404(db, User, user_id, "User")
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot deactivate your own account",
+        )
+    _assert_not_last_active_admin(db, user)
     user.is_active = False
     db.commit()
