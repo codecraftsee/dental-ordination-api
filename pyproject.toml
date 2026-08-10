@@ -1,0 +1,35 @@
+# Tool configuration only. This project is an application, not an installable
+# package, so there is deliberately no [project] table or build backend.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["venv", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes — unused imports, undefined names
+    "I",   # isort — import ordering
+    "B",   # flake8-bugbear — likely bugs
+]
+
+# `UP` (pyupgrade) is deliberately absent. It rewrites `Optional[str]` into
+# `str | None`, which is a worthwhile change but a separate one — enabling it
+# here would fold that rewrite into the formatting pass and make the diff
+# unreviewable. It gets turned on in its own step.
+
+[tool.ruff.lint.flake8-bugbear]
+# B008 warns that a function call in an argument default is evaluated once, at
+# import. For FastAPI that is not a bug, it is the entire dependency-injection
+# mechanism — `Depends(...)`, `Query(...)` and friends are *meant* to be
+# evaluated once and inspected by the framework. Without this list B008 fires
+# nine times on correct code, which is how a linter gets ignored.
+extend-immutable-calls = [
+    "fastapi.Body",
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+    "app.dependencies.require_permission",
+]
