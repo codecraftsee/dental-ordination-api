@@ -7,7 +7,13 @@ on:
   pull_request:
     branches: [develop, preprod, master]
   push:
-    branches: [develop, preprod, master]
+    # preprod is deliberately absent. deploy-preprod.yml calls this workflow as
+    # its first job, so a push here would run the whole suite twice for one
+    # commit. Pull requests *into* preprod still run it directly.
+    branches: [develop, master]
+  # Lets deploy-preprod.yml reuse these exact jobs instead of copying them, so
+  # the tests gating a deploy can never drift from the tests gating a PR.
+  workflow_call:
 
 # A newer push to the same branch cancels the older run — no value in finishing
 # a build whose commit has already been superseded.

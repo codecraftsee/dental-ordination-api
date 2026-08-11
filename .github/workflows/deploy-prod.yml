@@ -1,0 +1,110 @@
+# Production does not exist yet. This workflow is a deliberate stub: it defines
+# the shape of a prod release so the decisions are recorded, and it fails at the
+# secrets check because the `production` environment intentionally holds none.
+#
+# Before it can do anything real, all of these have to exist:
+#   - the second Hetzner box, bootstrapped (deploy/bootstrap-server.sh)
+#   - a separate Supabase project (its own DATABASE_URL and storage keys)
+#   - a freshly generated SECRET_KEY, never the preprod one
+#   - the real domain, for API_HOST / ADMIN_HOST / ALLOWED_ORIGINS / FRONTEND_URL
+#   - a verified Resend domain, so invite emails reach anyone but the account owner
+#
+# There is no `push` trigger and that is the point. Adding one is the explicit
+# act of going live, not something that happens by merging to master.
+name: Deploy production (stub — not wired up)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to deploy, e.g. v1.0.0"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          # Full history so the ancestry check below has something to check.
+          fetch-depth: 0
+
+      - name: Verify the tag is on master
+        env:
+          TAG: ${{ inputs.tag }}
+        # Deploying from a tag pushed off some feature branch would ship code
+        # that never went through preprod. Ancestry is what makes the tag mean
+        # "this passed through the whole flow".
+        run: |
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          if ! git merge-base --is-ancestor "$TAG" origin/master; then
+            echo "::error::Tag $TAG is not an ancestor of master. Production only ships code that reached master via preprod."
+            exit 1
+          fi
+
+      - name: Verify the tag matches the app version
+        env:
+          TAG: ${{ inputs.tag }}
+        # app/main.py hardcodes its version and will silently drift from the tags
+        # otherwise. Catching it here beats discovering it from a /health response
+        # that claims the wrong build.
+        run: |
+          app_version="$(grep -oE 'version="[0-9]+\.[0-9]+\.[0-9]+"' app/main.py | head -1 | cut -d'"' -f2)"
+          if [ "v$app_version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match app/main.py version v$app_version. Bump the version in the release commit."
+            exit 1
+          fi
+
+      - name: Check the environment is configured
+        env:
+          SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
+          SERVER: ${{ secrets.PROD_SERVER }}
+        # Expected to fail today. That is the stub doing its job — it cannot
+        # deploy anywhere by accident, and it names exactly what is missing.
+        run: |
+          missing=""
+          [ -n "$SSH_KEY" ] || missing="$missing PROD_SSH_KEY"
+          [ -n "$KNOWN_HOSTS" ] || missing="$missing PROD_KNOWN_HOSTS"
+          [ -n "$SERVER" ] || missing="$missing PROD_SERVER"
+          if [ -n "$missing" ]; then
+            echo "::error::Production is not set up yet. Missing secrets:$missing"
+            echo "See the header comment in this file for everything that has to exist first."
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PROD_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          DENTAL_SERVER: ${{ secrets.PROD_SERVER }}
+          DENTAL_BRANCH: ${{ inputs.tag }}
+        # KNOWN GAP, and unreachable today because the secrets check above fails
+        # first. deploy-api.sh is environment-agnostic in every other respect
+        # (DENTAL_SERVER, DENTAL_BRANCH, DENTAL_REMOTE_DIR are all inputs), but
+        # it does `git reset --hard origin/$BRANCH`, and `origin/v1.0.0` is not a
+        # ref — tags live at refs/tags. Wiring prod up means teaching the script
+        # to resolve a tag as well as a branch. Left unfixed deliberately: the
+        # script currently deploys preprod correctly and is not worth touching
+        # for a code path nothing runs.
+        run: ./deploy/deploy-api.sh

@@ -1,0 +1,76 @@
+name: Deploy preprod
+
+on:
+  push:
+    branches: [preprod]
+  # Lets you redeploy the current preprod without inventing a commit — pick
+  # `preprod` in the branch dropdown when dispatching.
+  workflow_dispatch:
+
+# cancel-in-progress is false on purpose, the opposite of ci.yml. Cancelling a
+# test run costs nothing; cancelling a deploy can leave the server halfway
+# through `docker compose up --build`. Queue instead.
+concurrency:
+  group: deploy-preprod
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # The real gate: if lint, tests or the image build fail, `deploy` never runs.
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Deploy to Hetzner
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Holds the three secrets and the required-reviewer gate, so this job pauses
+    # for approval before it can read anything or touch the server.
+    environment:
+      name: preprod
+      # Hardcoded rather than read from a secret because GitHub does not expand
+      # the secrets context here. Change it when the real domain replaces sslip.io.
+      url: https://api.62-238-37-26.sslip.io
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the environment is configured
+        env:
+          SSH_KEY: ${{ secrets.DENTAL_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DENTAL_KNOWN_HOSTS }}
+          SERVER: ${{ secrets.DENTAL_SERVER }}
+        run: |
+          missing=""
+          [ -n "$SSH_KEY" ] || missing="$missing DENTAL_SSH_KEY"
+          [ -n "$KNOWN_HOSTS" ] || missing="$missing DENTAL_KNOWN_HOSTS"
+          [ -n "$SERVER" ] || missing="$missing DENTAL_SERVER"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing environment secrets:$missing"
+            echo "Add them under Settings -> Environments -> preprod -> Environment secrets."
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          # Read through the env context, not interpolated into the script body:
+          # a key or host line is arbitrary text and must never be parsed as shell.
+          SSH_KEY: ${{ secrets.DENTAL_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DENTAL_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned host key. Without this, ssh would either refuse to connect or
+          # have to be told to trust whatever answers on that IP.
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          DENTAL_SERVER: ${{ secrets.DENTAL_SERVER }}
+        # The same script you run by hand. Nothing about the deploy is
+        # reimplemented here, so the manual path stays a working escape hatch
+        # and cannot drift from what CI does.
+        run: ./deploy/deploy-api.sh
