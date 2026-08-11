@@ -218,4 +218,8 @@ def root():
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "env": settings.app_env}
+    # `version` mirrors the release tags on master (see the tagging convention),
+    # so a deployed instance can be identified without shelling into the server.
+    # It comes from the FastAPI app declaration, which the prod release workflow
+    # asserts against the tag being deployed.
+    return {"status": "healthy", "env": settings.app_env, "version": app.version}

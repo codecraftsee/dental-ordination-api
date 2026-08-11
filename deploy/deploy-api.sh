@@ -32,11 +32,24 @@ git checkout "${BRANCH}"
 git reset --hard "origin/${BRANCH}"
 git --no-pager log -1 --pretty='    now at %h %s'
 
-echo "--> Rebuilding containers"
+# Tag the image with the commit it was built from. Everything about rollback
+# depends on this, and so does being able to answer "what is actually running"
+# — with a fixed tag, a redeploy that changes nothing and a redeploy that
+# changes everything look identical.
+export IMAGE_TAG="\$(git rev-parse --short HEAD)"
+
+echo "--> Rebuilding containers (image tag: \${IMAGE_TAG})"
 docker compose --env-file "${REMOTE_DIR}/.env" up -d --build
 
-echo "--> Pruning dangling images"
-docker image prune -f >/dev/null
+# Keep the five most recent images so rollback-api.sh has somewhere to go.
+# \`docker image prune\` cannot do this job any more: it only removes *dangling*
+# images, and every image here is now tagged, so they would accumulate forever.
+# \`docker rmi\` refuses to remove an image a container is using, which is the
+# safety net for whichever build is currently live.
+# Written on one line on purpose: this heredoc is unquoted, so a trailing
+# backslash would be eaten as a line continuation before the server ever sees it.
+echo "--> Trimming old images (keeping the newest 5)"
+docker images dental-api --format '{{.Repository}}:{{.Tag}}' | tail -n +6 | xargs -r docker rmi >/dev/null 2>&1 || true
 
 docker compose --env-file "${REMOTE_DIR}/.env" ps
 EOF

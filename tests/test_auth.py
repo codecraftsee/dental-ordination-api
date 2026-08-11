@@ -278,6 +278,13 @@ class TestSetPassword:
 
 
 def test_health_reports_the_environment(client):
+    # Imported here, not at module scope: conftest.py has to repoint the
+    # environment at the test database before anything under app.* loads.
+    from app.main import app
+
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "healthy", "env": "test"}
+    # Still an exact match rather than a subset check: /health is what the
+    # deploy scripts poll and what identifies a running build, so a field
+    # appearing or vanishing should fail here and be an explicit decision.
+    assert resp.json() == {"status": "healthy", "env": "test", "version": app.version}
