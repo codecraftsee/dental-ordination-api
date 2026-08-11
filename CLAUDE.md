@@ -198,6 +198,16 @@ omitted the deployed frontend's requests get blocked. Deployment hostnames are
 deliberately not baked into the default, so a retired host can never keep CORS
 access by accident.
 
+## Branches
+- **`develop`** — the default branch and the target for pull requests. Day-to-day
+  work branches off it and merges back into it.
+- **`master`** — long-lived, but *not* where PRs go. Nothing deploys from it.
+- **`preprod`** — what the Hetzner box deploys from; see below.
+
+All three are covered by a GitHub ruleset that restricts deletions and blocks
+force pushes. Repository admins are on the bypass list, so a direct push is still
+possible when it has to be — the guards exist to catch accidents, not to gate you.
+
 ## Pre-production (Hetzner)
 - Deploys from the **`preprod`** branch, never `develop`
 - Docker Compose: FastAPI behind Caddy with automatic HTTPS — see [`deploy/README.md`](deploy/README.md)
