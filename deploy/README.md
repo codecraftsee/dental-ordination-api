@@ -47,6 +47,28 @@ export DENTAL_SERVER=deploy@<SERVER_IP>
 ./deploy/deploy-web.sh      # Angular (needs a `preprod` config in angular.json)
 ```
 
+Pushing to `preprod` also triggers `.github/workflows/deploy-preprod.yml`, which
+runs the test suite and then waits for your approval before running this same
+script. The manual route above stays available and is the escape hatch when
+Actions is unavailable.
+
+## Rolling back
+
+Each deploy tags its image with the commit it was built from, and the five most
+recent are kept on the server. Rolling back reuses one of them, so there is no
+fetch, no `pip install` and no build:
+
+```bash
+export DENTAL_SERVER=deploy@<SERVER_IP>
+./deploy/rollback-api.sh              # list what is on the server
+./deploy/rollback-api.sh 8261283      # switch to that image
+```
+
+Two limits, both deliberate and repeated in the script's header: it does not
+move the server's git clone, so the next deploy rebuilds from the branch and
+undoes the rollback; and it does not touch the database, which matters because
+`app/main.py` still runs DDL at startup.
+
 ## Local smoke test
 
 Verify the whole stack on your Mac before touching the server. Create an
