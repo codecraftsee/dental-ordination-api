@@ -1,8 +1,9 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel
+
+from pydantic import BaseModel, ConfigDict
+
 from app.models.treatment import TreatmentCategory
 
 
@@ -10,8 +11,8 @@ class TreatmentBase(BaseModel):
     code: str
     name: str
     category: TreatmentCategory
-    description: Optional[str] = None
-    default_price: Optional[Decimal] = None
+    description: str | None = None
+    default_price: Decimal | None = None
 
 
 class TreatmentCreate(TreatmentBase):
@@ -19,16 +20,15 @@ class TreatmentCreate(TreatmentBase):
 
 
 class TreatmentUpdate(BaseModel):
-    code: Optional[str] = None
-    name: Optional[str] = None
-    category: Optional[TreatmentCategory] = None
-    description: Optional[str] = None
-    default_price: Optional[Decimal] = None
+    code: str | None = None
+    name: str | None = None
+    category: TreatmentCategory | None = None
+    description: str | None = None
+    default_price: Decimal | None = None
 
 
 class TreatmentResponse(TreatmentBase):
     id: UUID
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

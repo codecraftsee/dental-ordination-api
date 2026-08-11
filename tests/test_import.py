@@ -1,0 +1,281 @@
+"""Characterization tests for POST /api/import/xlsx.
+
+The endpoint streams Server-Sent Events rather than returning JSON, and the
+frontend parses that stream by hand. These tests pin the event sequence and the
+payload keys, which is the contract that must survive the import refactor.
+"""
+
+import json
+from io import BytesIO
+
+from openpyxl import Workbook
+
+from tests.conftest import auth
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _build_xlsx(rows: list[list]) -> bytes:
+    """Write a sheet from a list of row-lists (None leaves the cell empty)."""
+    wb = Workbook()
+    ws = wb.active
+    for r, row in enumerate(rows, start=1):
+        for c, value in enumerate(row, start=1):
+            if value is not None:
+                ws.cell(row=r, column=c, value=value)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _dental_card(
+    visit_rows: list[list],
+    *,
+    gender: str = "m",
+    dob: str = "01.02.1990.",
+    first_name: str = "Marko",
+    last_name: str = "Petrovic",
+) -> bytes:
+    """A dental card in the layout the importer expects.
+
+    Patient details sit in column C of rows 3-11 (indices 2-10), and visit rows
+    start at index 14.
+    """
+    rows: list[list] = [[] for _ in range(14)]
+    rows[2] = [None, "Pol", gender]
+    rows[3] = [None, "Prezime", last_name]
+    rows[4] = [None, "Ime", first_name]
+    rows[5] = [None, "Roditelj", "Jovan"]
+    rows[6] = [None, "Datum rodjenja", dob]
+    rows[7] = [None, "Adresa", "Glavna 1"]
+    rows[8] = [None, "Grad", "Novi Sad"]
+    rows[9] = [None, "Telefon", "0601234567"]
+    rows[10] = [None, "Email", "marko@dental-test.com"]
+    rows[13] = ["Datum", None, "Dijagnoza", None, "Terapija", "Dr", "Cena"]
+    return _build_xlsx(rows + visit_rows)
+
+
+VISIT_ROW = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", "M", "4.000,00 din"]
+
+
+def _post(client, token, content: bytes, filename: str = "card.xlsx", **data):
+    return client.post(
+        "/api/import/xlsx",
+        files=[("files", (filename, content, XLSX_MIME))],
+        data=data,
+        headers=auth(token),
+    )
+
+
+def _events(response) -> list[dict]:
+    return [
+        json.loads(chunk[len("data: ") :])
+        for chunk in response.text.strip().split("\n\n")
+        if chunk.startswith("data: ")
+    ]
+
+
+def test_import_streams_progress_then_file_done_then_complete(client, admin_token, doctor):
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    events = _events(resp)
+    assert [e["type"] for e in events] == ["progress", "file_done", "complete"]
+
+    progress, file_done, complete = events
+    assert progress == {
+        "type": "progress",
+        "current": 1,
+        "total": 1,
+        "file": "card.xlsx",
+        "status": "processing",
+    }
+    assert file_done["file"] == "card.xlsx"
+    assert file_done["patients_created"] == 1
+    assert file_done["visits_created"] == 1
+    assert file_done["errors"] == []
+
+    summary = complete["summary"]
+    assert summary["files_processed"] == 1
+    assert summary["patients_created"] == 1
+    assert summary["visits_created"] == 1
+    assert summary["errors"] == []
+
+
+def test_import_persists_the_patient_and_visit(client, admin_token, doctor):
+    _post(client, admin_token, _dental_card([VISIT_ROW]))
+    headers = auth(admin_token)
+
+    patients = client.get("/api/patients", headers=headers).json()
+    assert len(patients) == 1
+    assert patients[0]["first_name"] == "Marko"
+    assert patients[0]["last_name"] == "Petrovic"
+    assert patients[0]["gender"] == "male"
+    assert patients[0]["date_of_birth"] == "1990-02-01"
+
+    visits = client.get("/api/visits", headers=headers).json()
+    assert len(visits) == 1
+    assert visits[0]["date"] == "2024-03-01"
+    assert visits[0]["tooth_number"] == 16
+    assert visits[0]["diagnosis_notes"] == "Caries d.16"
+    # "4.000,00 din" is European notation: dot groups thousands, comma decimals.
+    assert float(visits[0]["price"]) == 4000.00
+    assert visits[0]["paid"] is True
+    assert visits[0]["import_incomplete"] is False
+
+
+def test_reimporting_the_same_file_skips_duplicate_visits(client, admin_token, doctor):
+    card = _dental_card([VISIT_ROW])
+    _post(client, admin_token, card)
+
+    summary = _events(_post(client, admin_token, card))[-1]["summary"]
+    assert summary["patients_found"] == 1
+    assert summary["patients_created"] == 0
+    assert summary["visits_created"] == 0
+    assert summary["visits_skipped"] == 1
+
+
+def test_a_row_without_a_price_is_flagged_incomplete(client, admin_token, doctor):
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+    summary = _events(_post(client, admin_token, _dental_card([row])))[-1]["summary"]
+
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 1
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["import_incomplete"] is True
+    assert visits[0]["price"] is None
+
+
+def test_an_unreadable_gender_flags_the_patient_and_reports_it(client, admin_token, doctor):
+    card = _dental_card([VISIT_ROW], gender="?")
+    summary = _events(_post(client, admin_token, card))[-1]["summary"]
+
+    assert summary["patients_created"] == 1
+    assert summary["patients_incomplete"] == 1
+    assert any("Invalid gender" in e for e in summary["errors"])
+
+    patients = client.get("/api/patients", headers=auth(admin_token)).json()
+    assert patients[0]["gender"] == "male"
+    assert patients[0]["import_incomplete"] is True
+
+
+def test_a_missing_patient_name_reports_an_error_and_imports_nothing(client, admin_token, doctor):
+    card = _dental_card([VISIT_ROW], first_name="", last_name="")
+    summary = _events(_post(client, admin_token, card))[-1]["summary"]
+
+    assert summary["patients_created"] == 0
+    assert summary["visits_created"] == 0
+    assert any("Missing patient name" in e for e in summary["errors"])
+    assert client.get("/api/patients", headers=auth(admin_token)).json() == []
+
+
+def test_a_corrupt_file_fails_alone_without_killing_the_stream(client, admin_token, doctor):
+    resp = client.post(
+        "/api/import/xlsx",
+        files=[
+            ("files", ("broken.xlsx", b"definitely not a workbook", XLSX_MIME)),
+            ("files", ("good.xlsx", _dental_card([VISIT_ROW]), XLSX_MIME)),
+        ],
+        headers=auth(admin_token),
+    )
+
+    events = _events(resp)
+    assert [e["type"] for e in events] == [
+        "progress",
+        "file_done",
+        "progress",
+        "file_done",
+        "complete",
+    ]
+
+    broken, good = events[1], events[3]
+    assert broken["errors"], "the corrupt file should report an error"
+    assert broken["patients_created"] == 0
+    # The second file is committed independently of the first one's failure.
+    assert good["patients_created"] == 1
+    assert good["errors"] == []
+
+    summary = events[-1]["summary"]
+    assert summary["files_processed"] == 2
+    assert summary["patients_created"] == 1
+
+
+def test_doctor_id_form_field_overrides_row_initials(client, admin_token, doctor, make_user):
+    from app.models.user import UserRole
+
+    other = make_user(role=UserRole.DOCTOR, first_name="Zoran")
+
+    # The row says "M" (Milan), but the explicit doctor_id must win.
+    _post(client, admin_token, _dental_card([VISIT_ROW]), doctor_id=other.id)
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["doctor_id"] == other.id
+
+
+def test_a_file_with_too_few_rows_is_reported(client, admin_token, doctor):
+    short = _build_xlsx([["Dental card"], [], ["only three rows"]])
+    summary = _events(_post(client, admin_token, short))[-1]["summary"]
+
+    assert summary["patients_created"] == 0
+    assert any("File too short" in e for e in summary["errors"])
+
+
+def test_a_row_without_a_date_inherits_the_one_above(client, admin_token, doctor):
+    """These cards are hand-written; a blank date means 'same day'."""
+    rows = [
+        ["01.03.2024.", None, "Caries d.16", None, "Filling", "M", "4000"],
+        [None, None, "Caries d.17", None, "Filling", "M", "4000"],
+    ]
+    summary = _events(_post(client, admin_token, _dental_card(rows)))[-1]["summary"]
+    assert summary["visits_created"] == 2
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert {v["date"] for v in visits} == {"2024-03-01"}
+
+
+def test_rows_before_the_first_date_are_skipped(client, admin_token, doctor):
+    rows = [
+        [None, None, "Orphan row with no date yet", None, "Something", "M", "1000"],
+        ["05.04.2024.", None, "Caries d.21", None, "Filling", "M", "2000"],
+    ]
+    summary = _events(_post(client, admin_token, _dental_card(rows)))[-1]["summary"]
+    assert summary["visits_created"] == 1
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["date"] == "2024-04-05"
+
+
+def test_an_ambiguous_initial_falls_back_instead_of_guessing(client, admin_token, make_user):
+    """Two doctors share the initial 'M', so it must not resolve to either by name."""
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    marko = make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["doctor_id"] in {milan.id, marko.id}
+
+
+def test_import_with_no_doctors_in_the_system_reports_it(client, admin_token):
+    """No `doctor` fixture here: there is nobody to assign visits to."""
+    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1]["summary"]
+
+    assert summary["patients_created"] == 1
+    assert summary["visits_created"] == 0
+    assert any("No doctors in system" in e for e in summary["errors"])
+
+
+def test_an_unknown_doctor_id_is_rejected_before_streaming(client, admin_token):
+    resp = _post(
+        client,
+        admin_token,
+        _dental_card([VISIT_ROW]),
+        doctor_id="00000000-0000-0000-0000-000000000000",
+    )
+    assert resp.status_code == 400
+    assert "not found" in resp.json()["detail"]

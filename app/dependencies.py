@@ -1,18 +1,26 @@
+"""FastAPI auth dependencies.
+
+Everything here is meant to be passed to `Depends()`. The row-level helpers that
+used to live alongside it — `get_or_404`, `apply_update`, `ensure_code_available`
+— are plain functions and now live in `app/db_helpers.py`.
+"""
+
 from typing import Annotated
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+
 from app.database import get_db
 from app.models.user import User
+from app.permissions import ROLE_PERMISSIONS, Permission
 from app.services.auth import decode_token
-from app.permissions import Permission, ROLE_PERMISSIONS
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
-    db: Annotated[Session, Depends(get_db)]
+    token: Annotated[str, Depends(oauth2_scheme)], db: Annotated[Session, Depends(get_db)]
 ) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -34,8 +42,7 @@ def get_current_user(
 
     if not user.is_active:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is disabled"
+            status_code=status.HTTP_403_FORBIDDEN, detail="User account is disabled"
         )
 
     return user
@@ -46,8 +53,8 @@ def require_permission(*permissions: Permission):
         user_perms = ROLE_PERMISSIONS.get(current_user.role, frozenset())
         if not all(p in user_perms for p in permissions):
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions"
+                status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions"
             )
         return current_user
+
     return permission_checker

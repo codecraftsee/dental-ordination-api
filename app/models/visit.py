@@ -1,8 +1,10 @@
 import uuid
-from datetime import datetime
-from sqlalchemy import Column, String, Text, Date, DateTime, Integer, Numeric, Boolean, ForeignKey
+
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import relationship
+
 from app.database import Base
+from app.utils import utcnow
 
 
 class Visit(Base):
@@ -20,8 +22,8 @@ class Visit(Base):
     price = Column(Numeric(10, 2), nullable=True)
     paid = Column(Boolean, default=True, nullable=False)
     import_incomplete = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     patient = relationship("Patient", back_populates="visits")
     doctor = relationship("User", backref="visits")

@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel
+
+from pydantic import BaseModel, ConfigDict
 
 
 class PatientDocumentResponse(BaseModel):
@@ -9,10 +9,9 @@ class PatientDocumentResponse(BaseModel):
     filename: str
     content_type: str
     size_bytes: int
-    description: Optional[str] = None
-    uploaded_by_user_id: Optional[str] = None
+    description: str | None = None
+    uploaded_by_user_id: str | None = None
     uploaded_at: datetime
     signed_url: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

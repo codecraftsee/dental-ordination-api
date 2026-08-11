@@ -1,21 +1,24 @@
-from typing import Annotated, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
+
 from app.database import get_db
-from app.models.user import User
-from app.models.treatment import Treatment, TreatmentCategory
-from app.schemas.treatment import TreatmentCreate, TreatmentUpdate, TreatmentResponse
+from app.db_helpers import apply_update, ensure_code_available, get_or_404
 from app.dependencies import require_permission
+from app.models.treatment import Treatment, TreatmentCategory
+from app.models.user import User
 from app.permissions import Permission
+from app.schemas.treatment import TreatmentCreate, TreatmentResponse, TreatmentUpdate
 
 router = APIRouter(prefix="/api/treatments", tags=["treatments"])
 
 
-@router.get("", response_model=List[TreatmentResponse])
+@router.get("", response_model=list[TreatmentResponse])
 def list_treatments(
     db: Annotated[Session, Depends(get_db)],
     _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))],
-    category: Optional[TreatmentCategory] = Query(None)
+    category: TreatmentCategory | None = Query(None),
 ):
     query = db.query(Treatment)
 
@@ -29,14 +32,9 @@ def list_treatments(
 def create_treatment(
     treatment_data: TreatmentCreate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_CREATE))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_CREATE))],
 ):
-    existing = db.query(Treatment).filter(Treatment.code == treatment_data.code).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Treatment code already exists"
-        )
+    ensure_code_available(db, Treatment, treatment_data.code, "Treatment code already exists")
 
     treatment = Treatment(**treatment_data.model_dump())
     db.add(treatment)
@@ -49,15 +47,9 @@ def create_treatment(
 def get_treatment(
     treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_READ))],
 ):
-    treatment = db.query(Treatment).filter(Treatment.id == treatment_id).first()
-    if not treatment:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Treatment not found"
-        )
-    return treatment
+    return get_or_404(db, Treatment, treatment_id, "Treatment")
 
 
 @router.put("/{treatment_id}", response_model=TreatmentResponse)
@@ -65,31 +57,22 @@ def update_treatment(
     treatment_id: str,
     treatment_data: TreatmentUpdate,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_UPDATE))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_UPDATE))],
 ):
-    treatment = db.query(Treatment).filter(Treatment.id == treatment_id).first()
-    if not treatment:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Treatment not found"
-        )
+    treatment = get_or_404(db, Treatment, treatment_id, "Treatment")
 
     update_data = treatment_data.model_dump(exclude_unset=True)
 
     if "code" in update_data:
-        existing = db.query(Treatment).filter(
-            Treatment.code == update_data["code"],
-            Treatment.id != treatment_id
-        ).first()
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Treatment code already in use"
-            )
+        ensure_code_available(
+            db,
+            Treatment,
+            update_data["code"],
+            "Treatment code already in use",
+            exclude_id=treatment_id,
+        )
 
-    for key, value in update_data.items():
-        setattr(treatment, key, value)
-
+    apply_update(treatment, update_data)
     db.commit()
     db.refresh(treatment)
     return treatment
@@ -99,13 +82,8 @@ def update_treatment(
 def delete_treatment(
     treatment_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_DELETE))]
+    _: Annotated[User, Depends(require_permission(Permission.TREATMENTS_DELETE))],
 ):
-    treatment = db.query(Treatment).filter(Treatment.id == treatment_id).first()
-    if not treatment:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Treatment not found"
-        )
+    treatment = get_or_404(db, Treatment, treatment_id, "Treatment")
     db.delete(treatment)
     db.commit()

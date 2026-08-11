@@ -1,7 +1,8 @@
 from urllib.parse import urlparse
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import declarative_base, sessionmaker
+
 from app.config import get_settings
 
 settings = get_settings()
@@ -28,5 +29,11 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        # Roll back once, here, instead of in every endpoint that writes.
+        # Without this a failed write leaves the session in a broken state for
+        # whatever else runs in the same request.
+        db.rollback()
+        raise
     finally:
         db.close()

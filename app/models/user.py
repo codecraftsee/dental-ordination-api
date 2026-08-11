@@ -1,8 +1,10 @@
 import uuid
-from datetime import datetime
 from enum import Enum as PyEnum
-from sqlalchemy import Column, String, Boolean, DateTime, Enum
+
+from sqlalchemy import Boolean, Column, DateTime, Enum, String
+
 from app.database import Base
+from app.utils import utcnow
 
 
 class UserRole(str, PyEnum):
@@ -35,5 +37,5 @@ class User(Base):
     phone = Column(String(50), nullable=True)
     specialization = Column(String(50), nullable=True)
     license_number = Column(String(100), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

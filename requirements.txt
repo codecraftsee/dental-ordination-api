@@ -2,16 +2,22 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
+# Unused so far: schema changes still run as hand-rolled DDL in app/main.py.
+# Kept because retiring those onto alembic is planned, and dropping the pin now
+# only means re-adding it later.
 alembic==1.13.2
 pydantic[email]==2.9.2
 pydantic-settings==2.5.2
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-bcrypt<4.1
+# Exact pin, not `<4.1`. The ceiling is what passlib needs (4.1 moved
+# `__about__`, which passlib reads at import); the exact version is so a CI
+# build and a server build resolve the same wheel.
+bcrypt==4.0.1
 python-multipart==0.0.9
-pytest==8.3.3
-pytest-asyncio==0.24.0
+# Runtime, not test-only: supabase and its five sub-packages all require httpx.
+# Pinned here so the deployed image cannot resolve a different version.
 httpx==0.27.2
 openpyxl==3.1.5
-resend
+resend==2.35.0
 supabase==2.9.1
