@@ -1,0 +1,91 @@
+name: CI
+
+# The branch flow is develop -> preprod -> master. All three are gated by this
+# same workflow; only what happens *after* it differs (preprod deploys, master
+# will eventually cut a prod release).
+on:
+  pull_request:
+    branches: [develop, preprod, master]
+  push:
+    branches: [develop, preprod, master]
+
+# A newer push to the same branch cancels the older run — no value in finishing
+# a build whose commit has already been superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+
+    services:
+      # Mirrors docker-compose.test.yml. The suite runs against real PostgreSQL,
+      # never SQLite, so CI has to supply one. Port 5432 rather than 55432: that
+      # offset exists locally to avoid colliding with a developer's own Postgres,
+      # which cannot happen on a throwaway runner.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dental
+          POSTGRES_PASSWORD: dental
+          POSTGRES_DB: dental_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dental -d dental_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # tests/conftest.py reads this and repoints the whole process before
+      # importing app.*. The database name must contain "test" or conftest
+      # refuses to start — it drops and recreates the public schema.
+      TEST_DATABASE_URL: postgresql://dental:dental@localhost:5432/dental_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Reads 3.12 from .python-version, the same file the Dockerfile
+          # comment points at, so CI can't drift from the image.
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check app tests
+
+      - name: Format check
+        run: ruff format --check app tests
+
+      - name: Test
+        run: pytest
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    # Deliberately not `needs: test`. A broken Dockerfile and a failing test are
+    # different problems; running both means one push surfaces both. This is
+    # also the only place the image gets built before a deploy tries to build it
+    # on the server.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
