@@ -44,13 +44,18 @@ git push
 
 export DENTAL_SERVER=deploy@<SERVER_IP>
 ./deploy/deploy-api.sh      # API
-./deploy/deploy-web.sh      # Angular (needs a `preprod` config in angular.json)
 ```
 
 Pushing to `preprod` also triggers `.github/workflows/deploy-preprod.yml`, which
 runs the test suite and then waits for your approval before running this same
 script. The manual route above stays available and is the escape hatch when
 Actions is unavailable.
+
+The frontend ships from its own repository. `deploy-web.sh` used to live here,
+which meant the Angular deploy logic sat next to code that could not build it;
+it now lives at `deploy/deploy-web.sh` in `dental-ordination`, where the same
+script is both the manual escape hatch and what that repo's
+`deploy-preprod.yml` runs.
 
 ## Rolling back
 
