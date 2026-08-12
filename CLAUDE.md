@@ -284,8 +284,11 @@ environment — and therefore passes through the approval gate — can read them
   `env` comes from `APP_ENV`, `version` from the FastAPI app declaration. It is
   what the deploy scripts poll, so treat its shape as a contract; a
   characterization test asserts it exactly.
-- Frontend is served as static files from `/opt/dental/www`; it still needs a
-  `preprod` build configuration in the Angular repo before it can be deployed
+- Frontend is served as static files from `/opt/dental/www`, deployed from the
+  `dental-ordination` repository by its own `deploy/deploy-web.sh` and
+  `deploy-preprod.yml`. That repo has the same CI/CD setup as this one: a `CI`
+  workflow gating `develop`, and a `preprod` Environment holding its own copies
+  of the three secrets
 
 Deploys happen automatically on a push to `preprod`, gated by approval — see
 CI/CD above. `./deploy/deploy-api.sh` still works by hand and is the escape
