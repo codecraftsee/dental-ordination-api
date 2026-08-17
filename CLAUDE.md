@@ -122,6 +122,21 @@ resource. The `doctors` table was merged into `users` and dropped.
   - Event types: `progress` (before each file), `file_done` (after each file), `complete` (final summary)
   - Frontend must consume via `fetch()` + `ReadableStream` (not `EventSource`, which is GET-only)
   - Each file is committed/rolled back independently; errors appear in the event payload, not as HTTP errors
+  - **Capped at `MAX_IMPORT_FILES` (5000) files per request.** Starlette's
+    multipart parser defaults to 1000 and FastAPI calls `request.form()` with no
+    arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
+    this router ran — no log line, and no `text/event-stream` for the frontend's
+    SSE reader. `_RaisedFileLimitRoute` pre-parses the body to raise that limit.
+  - The frontend sends **200 files per request** and repeats per batch
+    (`MAX_FILES_PER_REQUEST` in the `dental-ordination` repo's
+    `patient.service.ts`). 5000 is a backstop against absurd requests, not the
+    intended size: every file in a request is held in memory for the whole run.
+    Re-sending a batch is safe — patients match on name plus date of birth and
+    visits on their content, so an already-imported file counts as
+    `visits_skipped`, not a duplicate.
+  - Duplicate visit rows *within a single card* are still imported twice. The
+    session sets `autoflush=False`, so the duplicate check only ever saw rows
+    already committed. Longstanding behaviour, left alone deliberately.
 
 ## Planned — not implemented
 Documented here so nobody assumes these already work.
@@ -184,7 +199,11 @@ FRONTEND_URL=http://localhost:4200
 - **Startup migrations still run on every boot**: `run_startup_migrations()` in
   `app/main.py` re-executes its PostgreSQL DDL against the live database at every
   start (`DROP TABLE staff_profiles`, `DROP TABLE doctors`, `ALTER ... DROP NOT
-  NULL`, an enum rename). The dead SQLite branches are gone. Retiring the rest
+  NULL`, an enum rename). The dead SQLite branches are gone. The two
+  `CREATE INDEX IF NOT EXISTS` statements at the end are there for the same
+  reason and are *not* redundant with the `Index()` entries on the models:
+  `create_all()` skips tables that already exist, indexes included, so the model
+  definitions only ever reach a fresh database. Names match on both sides. Retiring the rest
   means setting up alembic — it is pinned in `requirements.txt` but there is no
   `alembic/` directory — and stamping the current schema as a baseline first.
   This is also the ceiling on CD: a deploy can be rolled back, but the schema it

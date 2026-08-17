@@ -1,7 +1,7 @@
 import uuid
 from enum import Enum as PyEnum
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Enum, ForeignKey, String
+from sqlalchemy import Boolean, Column, Date, DateTime, Enum, ForeignKey, Index, String
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -15,6 +15,12 @@ class Gender(str, PyEnum):
 
 class Patient(Base):
     __tablename__ = "patients"
+
+    # The XLSX importer looks a patient up once per file by name plus date of
+    # birth. The name halves use ILIKE, which btree cannot serve, but the date
+    # is a plain equality and selective enough on its own — Postgres narrows on
+    # it and case-insensitively compares the handful of rows that come back.
+    __table_args__ = (Index("ix_patients_date_of_birth", "date_of_birth"),)
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True)

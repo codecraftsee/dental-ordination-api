@@ -2,14 +2,15 @@ import json
 import logging
 import random
 import re
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from typing import NamedTuple
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
@@ -22,7 +23,43 @@ from app.permissions import Permission
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/import", tags=["import"])
+# Starlette's multipart parser defaults to max_files=1000 (starlette/requests.py
+# `_get_form`), and FastAPI calls `await request.form()` with no arguments, so a
+# 1001-file import is rejected with a plain JSON 400 *before* this module runs —
+# no log line, and no `text/event-stream` for the frontend's SSE reader to
+# parse, which makes it look like a silent hang rather than an error.
+#
+# This is a safety net, not the intended path: the frontend batches uploads (see
+# MAX_FILES_PER_REQUEST in the docstring below). It stays finite because every
+# file in a request is held in memory twice — once in Starlette's spooled form,
+# once in `file_data` below. Caddy's `request_body max_size 100MB` is the real
+# ceiling; this only stops a pathological file *count* from getting that far.
+MAX_IMPORT_FILES = 5000
+
+
+class _RaisedFileLimitRoute(APIRoute):
+    """Parse multipart bodies with `MAX_IMPORT_FILES` instead of Starlette's 1000.
+
+    `Request._get_form` memoises into `self._form` and re-parses only when it is
+    None, so parsing here first means FastAPI's own `await request.form()` is a
+    cache hit and inherits these limits. Nothing else about the request changes.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            content_type = request.headers.get("content-type", "")
+            if content_type.startswith("multipart/form-data"):
+                # Still raises HTTPException(400) past the limit — same failure
+                # shape as before, just a much higher threshold.
+                await request.form(max_files=MAX_IMPORT_FILES)
+            return await original_route_handler(request)
+
+        return custom_route_handler
+
+
+router = APIRouter(prefix="/api/import", tags=["import"], route_class=_RaisedFileLimitRoute)
 
 TOOTH_REGEX = re.compile(r"d\.?\s?(\d+)", re.IGNORECASE)
 
@@ -337,23 +374,41 @@ def _import_workbook(
         if header.incomplete:
             counts["patients_incomplete"] += 1
 
+    # Every visit row used to run its own duplicate-check SELECT. That is one
+    # network round trip per row against a remote pooler, so a card with fifty
+    # visits paid fifty latencies before inserting anything — the cost an index
+    # cannot remove. One query per file loads the same information.
+    #
+    # A patient created moments ago has no visits, so skip even that query.
+    #
+    # Only columns are selected, not entities: this comparison set must not put
+    # the patient's whole visit history into the session's identity map, which
+    # would then be flushed and dirty-checked on commit.
+    existing_visits: set[tuple] = set()
+    if counts["patients_found"]:
+        existing_visits = {
+            row
+            for row in db.query(Visit.date, Visit.diagnosis_notes, Visit.treatment_notes).filter(
+                Visit.patient_id == patient.id
+            )
+        }
+
     for visit_row in _iter_visit_rows(rows):
         doctor_id = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
         if not doctor_id:
             errors.append(f"{filename} row {visit_row.row_number}: No doctors in system, skipping")
             continue
 
-        already_imported = (
-            db.query(Visit)
-            .filter(
-                Visit.patient_id == patient.id,
-                Visit.date == visit_row.visit_date,
-                Visit.diagnosis_notes == visit_row.diagnosis_notes,
-                Visit.treatment_notes == visit_row.treatment_notes,
-            )
-            .first()
-        )
-        if already_imported:
+        # Deliberately not adding inserted rows to this set. The session sets
+        # autoflush=False, so the old per-row query could not see visits added
+        # earlier in this same file either, and a card that repeats a row still
+        # imports it twice. Preserved as-is: changing it would silently move
+        # numbers in the summary, and it is a separate decision from this one.
+        if (
+            visit_row.visit_date,
+            visit_row.diagnosis_notes,
+            visit_row.treatment_notes,
+        ) in existing_visits:
             counts["visits_skipped"] += 1
             continue
 
@@ -419,6 +474,15 @@ async def import_xlsx_files(
     - progress: emitted before each file starts processing
     - file_done: emitted after each file completes (success or per-file error)
     - complete: emitted once after all files are processed, with the full summary
+
+    Callers should send **at most 200 files per request** and repeat the call
+    per batch (the frontend's MAX_FILES_PER_REQUEST). A request is all-or-nothing
+    at the transport level: every file is buffered in memory for the whole run,
+    and a dropped connection loses the progress stream for everything still
+    queued behind it. Batching bounds both, and re-sending a batch is safe —
+    patients are matched on name plus date of birth and visits on their content,
+    so an already-imported file lands as `visits_skipped`, not as duplicates.
+    `MAX_IMPORT_FILES` above is the hard backstop, not the recommended size.
     """
     override_doctor_id = _validate_override_doctor(doctor_id)
 
