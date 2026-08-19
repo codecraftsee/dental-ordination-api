@@ -122,6 +122,21 @@ resource. The `doctors` table was merged into `users` and dropped.
   - Event types: `progress` (before each file), `file_done` (after each file), `complete` (final summary)
   - Frontend must consume via `fetch()` + `ReadableStream` (not `EventSource`, which is GET-only)
   - Each file is committed/rolled back independently; errors appear in the event payload, not as HTTP errors
+  - **Capped at `MAX_IMPORT_FILES` (5000) files per request.** Starlette's
+    multipart parser defaults to 1000 and FastAPI calls `request.form()` with no
+    arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
+    this router ran — no log line, and no `text/event-stream` for the frontend's
+    SSE reader. `_RaisedFileLimitRoute` pre-parses the body to raise that limit.
+  - The frontend sends **200 files per request** and repeats per batch
+    (`MAX_FILES_PER_REQUEST` in the `dental-ordination` repo's
+    `patient.service.ts`). 5000 is a backstop against absurd requests, not the
+    intended size: every file in a request is held in memory for the whole run.
+    Re-sending a batch is safe — patients match on name plus date of birth and
+    visits on their content, so an already-imported file counts as
+    `visits_skipped`, not a duplicate.
+  - Duplicate visit rows *within a single card* are still imported twice. The
+    session sets `autoflush=False`, so the duplicate check only ever saw rows
+    already committed. Longstanding behaviour, left alone deliberately.
 
 ## Planned — not implemented
 Documented here so nobody assumes these already work.
@@ -177,13 +192,22 @@ FRONTEND_URL=http://localhost:4200
 ```
 
 ## Known Issues & Fixes
-- **passlib + bcrypt 5.x incompatibility**: pin `bcrypt<4.1` in requirements.txt
+- **passlib + bcrypt 5.x incompatibility**: `bcrypt` must stay below 4.1, which
+  moved `__about__` — passlib reads it at import. Pinned exactly (`==4.0.1`)
+  rather than as a `<4.1` ceiling so a CI build and a server build resolve the
+  same wheel. `resend` is pinned exactly for the same reason.
 - **Startup migrations still run on every boot**: `run_startup_migrations()` in
   `app/main.py` re-executes its PostgreSQL DDL against the live database at every
   start (`DROP TABLE staff_profiles`, `DROP TABLE doctors`, `ALTER ... DROP NOT
-  NULL`, an enum rename). The dead SQLite branches are gone. Retiring the rest
+  NULL`, an enum rename). The dead SQLite branches are gone. The two
+  `CREATE INDEX IF NOT EXISTS` statements at the end are there for the same
+  reason and are *not* redundant with the `Index()` entries on the models:
+  `create_all()` skips tables that already exist, indexes included, so the model
+  definitions only ever reach a fresh database. Names match on both sides. Retiring the rest
   means setting up alembic — it is pinned in `requirements.txt` but there is no
   `alembic/` directory — and stamping the current schema as a baseline first.
+  This is also the ceiling on CD: a deploy can be rolled back, but the schema it
+  changed on the way up cannot, and the image is stuck at `--workers 1`.
 - **`specs/` is gitignored and must stay that way**: it held four real patient
   dental cards, committed 2026-02-07 and untracked on 2026-08-10. They are still
   present in git history; removing them from past commits needs `git-filter-repo`
@@ -199,27 +223,127 @@ deliberately not baked into the default, so a retired host can never keep CORS
 access by accident.
 
 ## Branches
-- **`develop`** — the default branch and the target for pull requests. Day-to-day
-  work branches off it and merges back into it.
-- **`master`** — long-lived, but *not* where PRs go. Nothing deploys from it.
-- **`preprod`** — what the Hetzner box deploys from; see below.
 
-All three are covered by a GitHub ruleset that restricts deletions and blocks
-force pushes. Repository admins are on the bypass list, so a direct push is still
-possible when it has to be — the guards exist to catch accidents, not to gate you.
+The promotion path is **`develop` → `preprod` → `master`**, in that order.
+
+- **`develop`** — the default branch and the target for pull requests. Day-to-day
+  work branches off it and merges back into it. May run ahead of the other two.
+- **`preprod`** — what the Hetzner box deploys from; see below.
+- **`master`** — the production branch. It only ever receives merges from
+  `preprod`, never straight from `develop`, so it can only contain code that has
+  actually run on a real server. Nothing deploys from it yet — production does
+  not exist.
+
+Cut a build with `--no-ff`:
+
+```bash
+git checkout preprod && git pull
+git merge --no-ff develop -m "preprod: cut build $(date +%F)"
+git push
+```
+
+`--no-ff` matters once `preprod` is a strict ancestor of `develop`: a plain merge
+fast-forwards and leaves no commit marking which build was cut, which is what
+makes "what changed between the last two builds" answerable.
+
+All three branches are covered by a GitHub ruleset that restricts deletions and
+blocks force pushes. Repository admins are on the bypass list, so a direct push
+is still possible when it has to be — the guards exist to catch accidents, not to
+gate you.
+
+A **separate** ruleset (`develop CI`) requires the CI checks, and targets
+`develop` only. That separation is deliberate: required status checks also apply
+to direct pushes, so putting them on `preprod` or `master` would reject the
+merge-and-push commands above — the commit has no checks at the moment it is
+pushed.
+
+## Release tags
+
+Tags live on **`master` only**. Preprod builds are identified by commit SHA (see
+the image tags below), because preprod moves too often for tags to mean anything.
+
+- Annotated tags (`git tag -a`), semver `vMAJOR.MINOR.PATCH`
+- **MAJOR** — an API contract break that forces the Angular app to ship
+  simultaneously; **MINOR** — backward-compatible feature; **PATCH** — fix
+- First release will be `v1.0.0`, matching the version already declared in
+  `app/main.py`. There are no tags yet.
+- Tags are immutable. A wrong tag means a new patch tag, never a moved one —
+  something may already be running that version.
+- Bump `version=` in `app/main.py` as part of the release commit.
+  `deploy-prod.yml` asserts the tag matches it and fails the release otherwise.
+
+## CI/CD
+
+Three workflows in `.github/workflows/`:
+
+- **`ci.yml`** — lint (`ruff check`, `ruff format --check`), the test suite
+  against a PostgreSQL 16 service container, and a Docker image build. Runs on
+  PRs into all three branches and on pushes to `develop`/`master`. `preprod` is
+  absent from the push triggers on purpose: `deploy-preprod.yml` calls this
+  workflow via `workflow_call`, so a push there would otherwise run the suite
+  twice for one commit.
+- **`deploy-preprod.yml`** — on pushes to `preprod` and via `workflow_dispatch`.
+  Runs `ci.yml` first, then waits for approval on the `preprod` GitHub
+  Environment, then runs `deploy/deploy-api.sh` **unchanged**. There is one
+  implementation of "deploy"; the manual script stays a working escape hatch and
+  cannot drift from what CI does. Concurrency queues rather than cancels —
+  cancelling a deploy can leave the server mid-`docker compose up --build`.
+- **`deploy-prod.yml`** — a deliberate stub with **no push trigger**. See
+  Production below.
+
+Secrets (`DENTAL_SSH_KEY`, `DENTAL_KNOWN_HOSTS`, `DENTAL_SERVER`) live on the
+`preprod` *Environment*, not on the repository, so only a job that declares that
+environment — and therefore passes through the approval gate — can read them.
 
 ## Pre-production (Hetzner)
 - Deploys from the **`preprod`** branch, never `develop`
 - Docker Compose: FastAPI behind Caddy with automatic HTTPS — see [`deploy/README.md`](deploy/README.md)
 - Server config lives at `/opt/dental/.env` only; the local `.env` is never used by a deploy
-- `GET /health` returns `{"status": "healthy", "env": "..."}` — `env` comes from `APP_ENV`
-- Frontend is served as static files from `/opt/dental/www`; it still needs a
-  `preprod` build configuration in the Angular repo before it can be deployed
+- `GET /health` returns `{"status": "healthy", "env": "...", "version": "..."}` —
+  `env` comes from `APP_ENV`, `version` from the FastAPI app declaration. It is
+  what the deploy scripts poll, so treat its shape as a contract; a
+  characterization test asserts it exactly.
+- Frontend is served as static files from `/opt/dental/www`, deployed from the
+  `dental-ordination` repository by its own `deploy/deploy-web.sh` and
+  `deploy-preprod.yml`. That repo has the same CI/CD setup as this one: a `CI`
+  workflow gating `develop`, and a `preprod` Environment holding its own copies
+  of the three secrets
+
+Deploys happen automatically on a push to `preprod`, gated by approval — see
+CI/CD above. `./deploy/deploy-api.sh` still works by hand and is the escape
+hatch when Actions is unavailable.
+
+Each deploy tags its image `dental-api:<short-sha>` and the newest five are kept
+on the server, so a rollback reuses an image already on disk:
+
+```bash
+export DENTAL_SERVER=deploy@<SERVER_IP>
+./deploy/rollback-api.sh              # list what is available
+./deploy/rollback-api.sh <short-sha>  # switch, no rebuild
+```
+
+Two limits, both intentional: rolling back does not move the server's git clone,
+so the next deploy rebuilds from the branch and undoes it; and it does not touch
+the database, which matters while schema changes still ride along in startup DDL.
 
 ## Production
-There is no separate production environment. The Hetzner box above is the only
-deployment. Railway (API) and Vercel (frontend) were both retired — do not add
-`Procfile`, `railway.json`, or Vercel config back.
+There is no production environment yet. The Hetzner pre-prod box above is the
+only deployment. Railway (API) and Vercel (frontend) were both retired — do not
+add `Procfile`, `railway.json`, or Vercel config back.
+
+`.github/workflows/deploy-prod.yml` exists as a **stub**: `workflow_dispatch`
+only, taking a release tag, against an empty `production` Environment. It fails
+at its secrets check rather than deploying anywhere, and it records the release
+rules while they are fresh — the tag must be an ancestor of `master`, and must
+match the version in `app/main.py`. Adding a push trigger is the deliberate act
+of going live; do not add one as a side effect of something else.
+
+Wiring it up needs, none of which is code: the second Hetzner box bootstrapped
+(the user owns a two-server package and server 2 is reserved for this), a
+separate Supabase project, a freshly generated `SECRET_KEY`, the real domain for
+`API_HOST`/`ADMIN_HOST`/`ALLOWED_ORIGINS`/`FRONTEND_URL`, and a verified Resend
+domain. One code gap too: `deploy-api.sh` resolves `origin/$BRANCH`, so it
+cannot check out a tag yet — see the comment in `deploy-prod.yml`.
 
 Still hosted by Supabase, and unaffected by that move:
 - **Database** — PostgreSQL, set via `DATABASE_URL` (pooler host)

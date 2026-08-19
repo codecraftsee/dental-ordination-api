@@ -208,6 +208,22 @@ def run_startup_migrations():
                         sqlalchemy.text(f"ALTER TYPE userrole RENAME VALUE '{old}' TO '{new}'")
                     )
 
+    # Indexes for the XLSX import hot path, defined on the models in
+    # app/models/{visit,patient}.py. create_all() above skips any table that
+    # already exists, indexes included, so the model definitions only ever
+    # reach a fresh database — a deployed schema needs the DDL spelled out.
+    #
+    # The names match the model definitions exactly, so whichever path runs
+    # first the other becomes a no-op. Not CONCURRENTLY: it cannot run inside a
+    # transaction block, and these tables are small enough that the brief write
+    # lock is not worth the added failure mode of a half-built invalid index.
+    for index_ddl in (
+        "CREATE INDEX IF NOT EXISTS ix_visits_patient_id_date ON visits (patient_id, date)",
+        "CREATE INDEX IF NOT EXISTS ix_patients_date_of_birth ON patients (date_of_birth)",
+    ):
+        with engine.begin() as conn:
+            conn.execute(sqlalchemy.text(index_ddl))
+
     seed_defaults(engine)
 
 
