@@ -488,6 +488,67 @@ def test_rows_with_no_resolvable_doctor_collapse_to_one_error_per_file(client):
     assert errors == ["card.xlsx: No doctors in system, skipped 3 visit row(s)"]
 
 
+def test_a_second_import_is_refused_while_one_is_running(client, admin_token, doctor):
+    """One import at a time: every file in a request stays in memory for the run."""
+    from app.routers.import_xlsx import _IMPORT_SLOT
+
+    held = _IMPORT_SLOT.acquire()
+    assert held is not None
+    try:
+        resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
+        assert resp.status_code == 409
+        assert "already running" in resp.json()["detail"]
+    finally:
+        _IMPORT_SLOT.release(held)
+
+
+def test_the_slot_is_free_again_after_an_import_finishes(client, admin_token, doctor):
+    """A leaked slot would wedge the endpoint until the container restarted."""
+    assert _post(client, admin_token, _dental_card([VISIT_ROW])).status_code == 200
+
+    from app.routers.import_xlsx import _IMPORT_SLOT
+
+    token = _IMPORT_SLOT.acquire()
+    assert token is not None
+    _IMPORT_SLOT.release(token)
+
+
+def test_a_rejected_request_does_not_consume_the_slot(client, admin_token, doctor):
+    """The slot is claimed after validation, so a 400 leaves it free."""
+    bad = _post(
+        client,
+        admin_token,
+        _dental_card([VISIT_ROW]),
+        doctor_id="00000000-0000-0000-0000-000000000000",
+    )
+    assert bad.status_code == 400
+
+    assert _post(client, admin_token, _dental_card([VISIT_ROW])).status_code == 200
+
+
+def test_a_stale_slot_is_taken_over_and_the_old_holder_cannot_free_it():
+    """Staleness covers a generator that never ran its finally; fencing keeps
+    the displaced holder from releasing its successor's claim."""
+    from app.routers import import_xlsx
+
+    slot = import_xlsx._ImportSlot()
+
+    abandoned = slot.acquire()
+    assert slot.acquire() is None  # still live, so no takeover
+
+    slot._last_activity -= import_xlsx.IMPORT_STALE_AFTER_SECONDS + 1
+    successor = slot.acquire()
+    assert successor is not None and successor != abandoned
+
+    # The abandoned run finally unwinds and releases — its token is stale, so
+    # the slot must stay held by the successor.
+    slot.release(abandoned)
+    assert slot.acquire() is None
+
+    slot.release(successor)
+    assert slot.acquire() is not None
+
+
 def test_an_unknown_doctor_id_is_rejected_before_streaming(client, admin_token):
     resp = _post(
         client,

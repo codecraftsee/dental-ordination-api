@@ -160,6 +160,25 @@ resource. The `doctors` table was merged into `users` and dropped.
     Re-sending a batch is safe — patients match on name plus date of birth and
     visits on their content, so an already-imported file counts as
     `visits_skipped`, not a duplicate.
+  - **One import at a time.** A request arriving while another is in progress is
+    refused with a `409`, not queued — waiting would mean a second request
+    sitting on its whole body in memory, which is the thing being rationed. The
+    slot is in-process (`_ImportSlot`), which is exactly as wide as the process
+    it protects at `--workers 1`, and means a crash clears it rather than
+    stranding a lock. **Adding workers silently stops this guarding anything**;
+    the replacement is a Postgres advisory lock held on one dedicated connection
+    for the whole run, not the per-file sessions used today. The slot is
+    released by the streaming generator's `finally`, with a
+    `IMPORT_STALE_AFTER_SECONDS` (300) takeover as a backstop for the case where
+    the generator never runs at all — Starlette builds the response before it
+    iterates the body, so a client vanishing in that window would otherwise wedge
+    the endpoint until restart. Acquisitions are fenced with a token so a
+    displaced holder cannot release its successor's claim.
+    - Caveat: the frontend's batched run is *many* requests, so the slot is held
+      per batch, not per run. Two people importing at once will not corrupt
+      anything, but they can interleave between batches and both get a `409`
+      part-way. Fixing that properly means a run id sent with every batch and a
+      slot keyed to it — a frontend change, deliberately not done yet.
   - **A matched patient's empty contact columns are filled in, never
     overwritten.** `parent_name`, `address`, `city`, `phone` and `email` are
     copied from the card only where the stored patient holds `NULL`, so the

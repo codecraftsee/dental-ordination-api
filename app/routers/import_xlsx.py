@@ -2,6 +2,8 @@ import json
 import logging
 import random
 import re
+import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -35,6 +37,73 @@ logger = logging.getLogger(__name__)
 # once in `file_data` below. Caddy's `request_body max_size 100MB` is the real
 # ceiling; this only stops a pathological file *count* from getting that far.
 MAX_IMPORT_FILES = 5000
+
+# How long the slot below may go untouched before another request may take it.
+# Every file refreshes it, and a card takes well under a second, so a live
+# import cannot look stale — this only ever fires on a holder that is gone.
+IMPORT_STALE_AFTER_SECONDS = 300
+
+
+class _ImportSlot:
+    """Single-occupancy slot: one import runs at a time, per process.
+
+    Every file in a request is held in memory for the whole run, so a second
+    concurrent import multiplies the peak — against one uvicorn worker
+    (`--workers 1`) and `pool_size=5` to a remote pooler, neither of which has
+    headroom for it. `acquire` refuses rather than waits: a queued import would
+    sit holding its entire request body in memory, which is the thing being
+    rationed in the first place.
+
+    In-process deliberately. It is exactly as wide as the process it protects,
+    which is right at one worker, and it means a crash or a restart clears it
+    instead of stranding a lock nobody owns. Adding workers would make this
+    silently stop guarding anything; the replacement is a Postgres advisory
+    lock, which has to be held on one dedicated connection for the whole run
+    rather than the per-file sessions used here.
+
+    Releasing is the streaming generator's `finally`, with staleness as a
+    backstop. The backstop is not paranoia: Starlette builds the response before
+    it iterates the body, so a client that disappears in that window leaves a
+    generator that is collected without ever running its `finally`, and the slot
+    would be held until the container restarted.
+
+    Each acquisition gets a token, and `touch`/`release` are no-ops unless they
+    present the current one. Without that fencing, a holder that was declared
+    stale and taken over would release the slot out from under its successor.
+    """
+
+    def __init__(self) -> None:
+        self._mutex = threading.Lock()
+        self._held = False
+        self._token = 0
+        self._last_activity = 0.0
+
+    def acquire(self) -> int | None:
+        """Claim the slot, returning a token, or None if somebody live holds it."""
+        with self._mutex:
+            if self._held and time.monotonic() - self._last_activity < IMPORT_STALE_AFTER_SECONDS:
+                return None
+            if self._held:
+                logger.warning(
+                    "Import: taking over a slot idle for >%ds", IMPORT_STALE_AFTER_SECONDS
+                )
+            self._token += 1
+            self._held = True
+            self._last_activity = time.monotonic()
+            return self._token
+
+    def touch(self, token: int) -> None:
+        with self._mutex:
+            if token == self._token:
+                self._last_activity = time.monotonic()
+
+    def release(self, token: int) -> None:
+        with self._mutex:
+            if token == self._token:
+                self._held = False
+
+
+_IMPORT_SLOT = _ImportSlot()
 
 
 class _RaisedFileLimitRoute(APIRoute):
@@ -623,6 +692,12 @@ async def import_xlsx_files(
     cannot undo a correction made in the UI. `patients_updated` counts the ones
     actually written to, as a subset of `patients_found`.
 
+    Only one import runs at a time. A request arriving while another is in
+    progress is refused with a 409 rather than queued — waiting would mean
+    holding a second request's whole body in memory, which is what the limit
+    exists to prevent. Note that the frontend's batched run is many requests, so
+    the slot is claimed and released per batch, not for the run as a whole.
+
     If `doctor_id` is provided, that doctor is assigned to every imported visit,
     overriding per-row initial matching and the random fallback. If omitted, the
     original behaviour applies (match by first-name initial, fall back to random)
@@ -650,13 +725,28 @@ async def import_xlsx_files(
     if not override_doctor_id:
         _require_any_doctor()
 
-    # Read all file contents eagerly before returning StreamingResponse.
-    # UploadFile handles are closed by FastAPI once the endpoint returns,
-    # so they cannot be awaited inside the generator.
-    file_data: list[tuple[str, bytes]] = []
-    for upload_file in files:
-        content = await upload_file.read()
-        file_data.append((upload_file.filename or "unknown", content))
+    # Claimed after validation, so a rejected request never occupies the slot,
+    # and before the file reads, so a second import cannot buffer its copy of
+    # the bodies alongside the first.
+    slot_token = _IMPORT_SLOT.acquire()
+    if slot_token is None:
+        raise HTTPException(
+            status_code=409,
+            detail="An import is already running. Wait for it to finish and try again.",
+        )
+
+    try:
+        # Read all file contents eagerly before returning StreamingResponse.
+        # UploadFile handles are closed by FastAPI once the endpoint returns,
+        # so they cannot be awaited inside the generator.
+        file_data: list[tuple[str, bytes]] = []
+        for upload_file in files:
+            content = await upload_file.read()
+            file_data.append((upload_file.filename or "unknown", content))
+    except BaseException:
+        # Nothing downstream will run its `finally` if this fails here.
+        _IMPORT_SLOT.release(slot_token)
+        raise
 
     def generate():
         summary = {**_empty_counts(), "files_processed": 0, "errors": []}
@@ -666,6 +756,9 @@ async def import_xlsx_files(
             doctors = _load_doctor_index()
 
             for i, (filename, content) in enumerate(file_data):
+                # Proof of life for the slot's staleness check.
+                _IMPORT_SLOT.touch(slot_token)
+
                 yield _sse(
                     {
                         "type": "progress",
@@ -724,6 +817,11 @@ async def import_xlsx_files(
         except Exception as e:
             summary["errors"].append(f"Fatal error: {str(e)}")
             yield _sse({"type": "complete", "summary": summary})
+
+        finally:
+            # Runs on exhaustion, on error, and on the GeneratorExit thrown in
+            # when a disconnecting client closes the stream part-way.
+            _IMPORT_SLOT.release(slot_token)
 
     return StreamingResponse(
         generate(),
