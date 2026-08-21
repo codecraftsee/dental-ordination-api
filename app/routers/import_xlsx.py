@@ -195,19 +195,43 @@ def _load_doctor_index() -> DoctorIndex:
         db.close()
 
 
+class ResolvedDoctor(NamedTuple):
+    id: str | None
+    # Whether `id` identifies the doctor who actually did the work, or is only
+    # a stand-in that satisfies `visits.doctor_id`'s NOT NULL. A guessed id is
+    # fabricated clinical attribution, so the visit carrying it is flagged
+    # `import_incomplete` and reported — it must not read as fact.
+    guessed: bool
+
+
 def _resolve_doctor(
     override_doctor_id: str | None,
     doctor_initial: str | None,
     doctors: DoctorIndex,
-) -> str | None:
+) -> ResolvedDoctor:
     """A caller-supplied doctor wins, then an initial match, then any doctor."""
     if override_doctor_id:
-        return override_doctor_id
+        return ResolvedDoctor(override_doctor_id, guessed=False)
+
+    # Nobody to attribute to. `_require_any_doctor` rejects the run before it
+    # starts, so this is only reachable if every doctor is deleted mid-run.
+    if not doctors.ids:
+        return ResolvedDoctor(None, guessed=False)
+
     if doctor_initial:
         matched = doctors.by_initial.get(doctor_initial.upper())
         if matched:
-            return matched
-    return random.choice(doctors.ids) if doctors.ids else None
+            return ResolvedDoctor(matched, guessed=False)
+        # The card names somebody the index cannot identify: either no doctor
+        # has that initial, or two share it and `_load_doctor_index` dropped it
+        # rather than guess. Picking anyone here contradicts what the card says.
+        return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+
+    # The row names nobody. A single doctor in the system is the only possible
+    # answer rather than a choice between candidates, so it is not a guess.
+    if len(doctors.ids) == 1:
+        return ResolvedDoctor(doctors.ids[0], guessed=False)
+    return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
 
 
 class PatientHeader(NamedTuple):
@@ -400,10 +424,11 @@ def _import_workbook(
     # of which cross the SSE stream and are concatenated across batches by the
     # frontend. One line per file says the same thing.
     rows_without_doctor = 0
+    rows_with_guessed_doctor = 0
 
     for visit_row in _iter_visit_rows(rows):
-        doctor_id = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
-        if not doctor_id:
+        resolved = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
+        if not resolved.id:
             rows_without_doctor += 1
             continue
 
@@ -420,26 +445,39 @@ def _import_workbook(
             counts["visits_skipped"] += 1
             continue
 
+        # One flag, two causes: a missing price and an unidentified doctor both
+        # mean "a human needs to look at this row". `import_incomplete` is
+        # already what the UI's warning and PATCH .../dismiss-warning act on, so
+        # a guessed doctor rides the same path rather than inventing a second.
+        incomplete = visit_row.price is None or resolved.guessed
+
         db.add(
             Visit(
                 patient_id=patient.id,
-                doctor_id=doctor_id,
+                doctor_id=resolved.id,
                 date=visit_row.visit_date,
                 tooth_number=visit_row.tooth_number,
                 diagnosis_notes=visit_row.diagnosis_notes,
                 treatment_notes=visit_row.treatment_notes,
                 price=visit_row.price,
                 paid=True,
-                import_incomplete=visit_row.price is None,
+                import_incomplete=incomplete,
             )
         )
         counts["visits_created"] += 1
-        if visit_row.price is None:
+        if incomplete:
             counts["visits_incomplete"] += 1
+        if resolved.guessed:
+            rows_with_guessed_doctor += 1
 
     if rows_without_doctor:
         errors.append(
             f"{filename}: No doctors in system, skipped {rows_without_doctor} visit row(s)"
+        )
+    if rows_with_guessed_doctor:
+        errors.append(
+            f"{filename}: Could not identify the doctor for {rows_with_guessed_doctor} "
+            "visit row(s); assigned an arbitrary one and flagged them for review"
         )
 
 
@@ -514,7 +552,9 @@ async def import_xlsx_files(
     original behaviour applies (match by first-name initial, fall back to random)
     and the system must contain at least one DOCTOR user — otherwise the request
     is rejected with a 400 rather than importing patients whose visits would all
-    be dropped for want of anyone to attribute them to.
+    be dropped for want of anyone to attribute them to. A visit that falls back
+    to an arbitrary doctor is flagged `import_incomplete` and counted in the
+    summary's errors, so a fabricated attribution never reads as fact.
 
     Streams three event types:
     - progress: emitted before each file starts processing

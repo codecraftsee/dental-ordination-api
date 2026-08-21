@@ -248,17 +248,90 @@ def test_rows_before_the_first_date_are_skipped(client, admin_token, doctor):
     assert visits[0]["date"] == "2024-04-05"
 
 
-def test_an_ambiguous_initial_falls_back_instead_of_guessing(client, admin_token, make_user):
-    """Two doctors share the initial 'M', so it must not resolve to either by name."""
+def test_an_ambiguous_initial_falls_back_and_flags_the_visit(client, admin_token, make_user):
+    """Two doctors share the initial 'M', so it must not resolve to either by name.
+
+    The fallback still assigns somebody — `visits.doctor_id` is NOT NULL — but
+    that id is a stand-in, not an identification, so the row is flagged for
+    review and reported rather than passing as fact.
+    """
     from app.models.user import UserRole
 
     milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
     marko = make_user(role=UserRole.DOCTOR, first_name="Marko")
 
-    _post(client, admin_token, _dental_card([VISIT_ROW]))
+    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1]["summary"]
+
+    assert summary["visits_incomplete"] == 1
+    assert any("Could not identify the doctor" in e for e in summary["errors"])
 
     visits = client.get("/api/visits", headers=auth(admin_token)).json()
     assert visits[0]["doctor_id"] in {milan.id, marko.id}
+    assert visits[0]["import_incomplete"] is True
+
+
+def test_a_matched_initial_is_not_flagged(client, admin_token, doctor):
+    """The 'M' in VISIT_ROW resolves to Milan, so nothing is guessed."""
+    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1]["summary"]
+
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 0
+    assert summary["errors"] == []
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["doctor_id"] == doctor.id
+    assert visits[0]["import_incomplete"] is False
+
+
+def test_a_row_with_no_initial_and_one_doctor_is_not_a_guess(client, admin_token, doctor):
+    """With a single doctor there is no choice to get wrong, so no flag."""
+    row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", None, "4.000,00 din"]
+    summary = _events(_post(client, admin_token, _dental_card([row])))[-1]["summary"]
+
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 0
+    assert summary["errors"] == []
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["doctor_id"] == doctor.id
+    assert visits[0]["import_incomplete"] is False
+
+
+def test_a_row_with_no_initial_and_several_doctors_is_flagged(client, admin_token, make_user):
+    """Two candidates and nothing on the card to choose between them."""
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    zoran = make_user(role=UserRole.DOCTOR, first_name="Zoran")
+
+    row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", None, "4.000,00 din"]
+    summary = _events(_post(client, admin_token, _dental_card([row])))[-1]["summary"]
+
+    assert summary["visits_incomplete"] == 1
+    assert any("Could not identify the doctor" in e for e in summary["errors"])
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["doctor_id"] in {milan.id, zoran.id}
+    assert visits[0]["import_incomplete"] is True
+
+
+def test_an_explicit_doctor_id_is_never_a_guess(client, admin_token, make_user):
+    """The caller stated who it was, so the row is taken at its word."""
+    from app.models.user import UserRole
+
+    # 'M' would resolve to Milan on its own; the override must win *and* not flag.
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    zoran = make_user(role=UserRole.DOCTOR, first_name="Zoran")
+
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW]), doctor_id=zoran.id)
+    summary = _events(resp)[-1]["summary"]
+
+    assert summary["visits_incomplete"] == 0
+    assert summary["errors"] == []
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["doctor_id"] == zoran.id
+    assert visits[0]["import_incomplete"] is False
 
 
 def test_import_with_no_doctors_in_the_system_is_rejected_before_streaming(client, admin_token):

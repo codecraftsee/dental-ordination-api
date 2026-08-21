@@ -137,6 +137,17 @@ resource. The `doctors` table was merged into `users` and dropped.
     rejects the request with a `400` instead. Recovery is a re-import once a
     doctor exists: patients match on name plus date of birth and are found, not
     duplicated, and their empty visit histories fill in.
+  - **A visit whose doctor could not be identified is flagged, not invented.**
+    Attribution is by first-name initial; when that fails the row still gets an
+    arbitrary doctor, because `visits.doctor_id` is `NOT NULL`. That id is a
+    stand-in and must never read as fact, so the visit is marked
+    `import_incomplete` and reported in the summary. It counts as a guess when
+    the card names an initial nothing matches — no such doctor, or two share it
+    and `_load_doctor_index` dropped it rather than pick — and when the card
+    names nobody while several doctors exist. A single doctor in the system with
+    no initial on the row is the only possible answer, not a choice, so it is
+    not flagged; neither is an explicit `doctor_id`, where the caller has said
+    who it was.
   - **Capped at `MAX_IMPORT_FILES` (5000) files per request.** Starlette's
     multipart parser defaults to 1000 and FastAPI calls `request.form()` with no
     arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
