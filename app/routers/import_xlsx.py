@@ -330,8 +330,10 @@ def _resolve_doctor(
     if override_doctor_id:
         return ResolvedDoctor(override_doctor_id, guessed=False)
 
-    # Nobody to attribute to. `_require_any_doctor` rejects the run before it
-    # starts, so this is only reachable if every doctor is deleted mid-run.
+    # Nobody to attribute to. `_doctor_index_for_run` refuses an empty index
+    # before the run starts, and the run then carries that same index all the
+    # way through, so this is unreachable in practice — it exists so the type
+    # stays honest rather than as a live branch.
     if not doctors.ids:
         return ResolvedDoctor(None, guessed=False)
 
@@ -565,12 +567,13 @@ def _import_workbook(
             )
         }
 
-    # Counted, not appended per row. `_require_any_doctor` makes this branch
-    # unreachable except in a race — every doctor deleted after the run started
-    # — but when it did fire it produced one error string per visit row per
-    # file. A 200-file batch turned into thousands of near-identical lines, all
-    # of which cross the SSE stream and are concatenated across batches by the
-    # frontend. One line per file says the same thing.
+    # Counted, not appended per row. `_doctor_index_for_run` refuses an empty
+    # index before the run starts and the run reuses that index throughout, so
+    # this branch no longer fires at all — but when it did, it produced one error
+    # string per visit row per file. A whole batch turned into thousands of
+    # near-identical lines, all of which cross the SSE stream and are
+    # concatenated across every batch of a run by the frontend. One line per
+    # file says the same thing.
     rows_without_doctor = 0
     rows_with_guessed_doctor = 0
     visit_rows_seen = 0
@@ -661,8 +664,8 @@ def _validate_override_doctor(doctor_id: str | None) -> str | None:
         db.close()
 
 
-def _require_any_doctor() -> None:
-    """Refuse the whole run when no doctor exists to attribute visits to.
+def _doctor_index_for_run(override_doctor_id: str | None) -> DoctorIndex:
+    """Load the index the whole run will use, refusing the run if it is unusable.
 
     `visits.doctor_id` is NOT NULL, so with an empty `DoctorIndex` every visit
     row hits the `no doctor` branch in `_import_workbook` and is dropped — while
@@ -673,22 +676,28 @@ def _require_any_doctor() -> None:
     default admin only and `app/seeds.py` never creates a doctor.
 
     Rejecting here, before the stream opens, is what makes it an error the user
-    reads instead of an empty `visits_created`. Only reachable when no
-    `doctor_id` override was supplied — that override is checked above and stands
-    in for the index entirely.
+    reads instead of an empty `visits_created`. A `doctor_id` override stands in
+    for the index entirely — `_resolve_doctor` returns it without consulting the
+    index — so an empty index is only fatal without one.
+
+    Loading here rather than inside the generator does two things. It halves the
+    queries this endpoint makes before streaming, which matters now the frontend
+    sends 50 files per request and a migration is ~160 of them. And it closes the
+    gap between checking and using: the index that was found non-empty is the
+    same object the run attributes visits with, so deleting the last doctor
+    mid-request can no longer turn a passing check into a run that drops every
+    visit it reads.
     """
-    db = SessionLocal()
-    try:
-        if db.query(User.id).filter(User.role == UserRole.DOCTOR).first() is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No doctors in the system. Create a user with the DOCTOR role, "
-                    "or pass doctor_id, before importing."
-                ),
-            )
-    finally:
-        db.close()
+    doctors = _load_doctor_index()
+    if not override_doctor_id and not doctors.ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No doctors in the system. Create a user with the DOCTOR role, "
+                "or pass doctor_id, before importing."
+            ),
+        )
+    return doctors
 
 
 @router.post("/xlsx")
@@ -750,8 +759,7 @@ async def import_xlsx_files(
     supported request size.
     """
     override_doctor_id = _validate_override_doctor(doctor_id)
-    if not override_doctor_id:
-        _require_any_doctor()
+    doctors = _doctor_index_for_run(override_doctor_id)
 
     # Claimed after validation, so a rejected request never occupies the slot,
     # and before the file reads, so a second import cannot buffer its copy of
@@ -797,7 +805,6 @@ async def import_xlsx_files(
         try:
             total = len(file_data)
             logger.info("Import: starting, %d file(s)", total)
-            doctors = _load_doctor_index()
 
             for i, (filename, content) in enumerate(file_data):
                 # Proof of life for the slot's staleness check.

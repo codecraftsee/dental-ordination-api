@@ -133,7 +133,7 @@ resource. The `doctors` table was merged into `users` and dropped.
     was dropped while the patient header around it committed normally — a
     reported-successful import that created patients with no visit history. That
     ran on preprod for ~2500 files before anyone noticed, because `app/seeds.py`
-    seeds the default admin and never a doctor. `_require_any_doctor()` now
+    seeds the default admin and never a doctor. `_doctor_index_for_run()` now
     rejects the request with a `400` instead. Recovery is a re-import once a
     doctor exists: patients match on name plus date of birth and are found, not
     duplicated, and their empty visit histories fill in.
