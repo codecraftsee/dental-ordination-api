@@ -133,7 +133,7 @@ resource. The `doctors` table was merged into `users` and dropped.
     was dropped while the patient header around it committed normally — a
     reported-successful import that created patients with no visit history. That
     ran on preprod for ~2500 files before anyone noticed, because `app/seeds.py`
-    seeds the default admin and never a doctor. `_require_any_doctor()` now
+    seeds the default admin and never a doctor. `_doctor_index_for_run()` now
     rejects the request with a `400` instead. Recovery is a re-import once a
     doctor exists: patients match on name plus date of birth and are found, not
     duplicated, and their empty visit histories fill in.
@@ -153,32 +153,68 @@ resource. The `doctors` table was merged into `users` and dropped.
     arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
     this router ran — no log line, and no `text/event-stream` for the frontend's
     SSE reader. `_RaisedFileLimitRoute` pre-parses the body to raise that limit.
-  - The frontend sends **200 files per request** and repeats per batch
+  - The frontend sends **50 files per request** and repeats per batch
     (`MAX_FILES_PER_REQUEST` in the `dental-ordination` repo's
-    `patient.service.ts`). 5000 is a backstop against absurd requests, not the
-    intended size: every file in a request is held in memory for the whole run.
+    `import-batch.ts`) — it was 200 before that repo's `import-run-control`
+    change. The number is no longer only about what this endpoint can take: it
+    also bounds how much work a Cancel throws away, how much a Resume re-sends,
+    and how long the progress bar sits still during upload, since `fetch` cannot
+    report upload progress. An 8,000-file migration is therefore ~160 requests.
+    `MAX_IMPORT_FILES` stays at 5000 as a backstop against a non-browser caller,
+    not as a supported size — Caddy's 100MB body limit already bounds the memory
+    a request can cost, and anything under Starlette's own 1000 would make
+    `_RaisedFileLimitRoute` tighten the default instead of raising it.
     Re-sending a batch is safe — patients match on name plus date of birth and
     visits on their content, so an already-imported file counts as
     `visits_skipped`, not a duplicate.
+  - **A cancelled run stops at the file in flight.** Verified against a live
+    uvicorn with a client that hard-closes the socket: the file being parsed
+    when the connection drops commits, and every file queued behind it is never
+    started. The client therefore sees one fewer `file_done` than the number of
+    files that actually committed — harmless, since re-sending the in-flight
+    file comes back as `visits_skipped`, but the frontend's resume manifest is
+    off by one at the abort point. Runs log their ending: `info` on completion,
+    `warning` naming how far it got on a disconnect. Before that, an abandoned
+    import left no server-side trace at all.
   - **One import at a time.** A request arriving while another is in progress is
-    refused with a `409`, not queued — waiting would mean a second request
+    refused with a **`429`**, not queued — waiting would mean a second request
     sitting on its whole body in memory, which is the thing being rationed. The
+    status must stay `429`: the frontend retries a batch on status 0, 5xx, 408
+    and 429 only (`isRetryableBatchError` in `patient-import.service.ts`) and
+    records the files as permanently failed on any other 4xx. Busy is transient
+    and is reachable from the client's own Cancel/Resume, so a `409` here — which
+    is what this originally returned — turns a race into a dead run. The
     slot is in-process (`_ImportSlot`), which is exactly as wide as the process
     it protects at `--workers 1`, and means a crash clears it rather than
     stranding a lock. **Adding workers silently stops this guarding anything**;
     the replacement is a Postgres advisory lock held on one dedicated connection
-    for the whole run, not the per-file sessions used today. The slot is
-    released by the streaming generator's `finally`, with a
-    `IMPORT_STALE_AFTER_SECONDS` (300) takeover as a backstop for the case where
-    the generator never runs at all — Starlette builds the response before it
-    iterates the body, so a client vanishing in that window would otherwise wedge
-    the endpoint until restart. Acquisitions are fenced with a token so a
-    displaced holder cannot release its successor's claim.
+    for the whole run, not the per-file sessions used today. Acquisitions are
+    fenced with a token so a displaced holder cannot release its successor's
+    claim, and so the overlapping releases below are harmless.
+    - **The slot is released three ways**, and the first one is load-bearing:
+      the response's `BackgroundTask`, which Starlette awaits once the response
+      task group exits — on a client disconnect just as much as on a fully sent
+      body; the generator's own `finally`, for exhaustion and errors; and the
+      `IMPORT_STALE_AFTER_SECONDS` (300) takeover, for the case where the
+      generator never runs at all, since Starlette builds the response before it
+      iterates the body.
+    - **Do not remove the `BackgroundTask`.** Measured against a live uvicorn
+      with a client that hard-closes the socket: without it a cancelled run held
+      the slot for **~80 seconds**, because nothing closes a suspended generator
+      promptly — its `finally` waits on the garbage collector — and the
+      staleness takeover is far too slow to help. The frontend retries a batch
+      three times over ~3 seconds, so Cancel then Resume failed every time. With
+      it, the slot frees in **~0.3s**, the residual being the in-flight file
+      finishing. A `TestClient` test cannot catch a regression here (it
+      finalises the generator in-process), so the guard is the structural
+      assertion in `test_the_response_carries_a_background_slot_release`.
     - Caveat: the frontend's batched run is *many* requests, so the slot is held
       per batch, not per run. Two people importing at once will not corrupt
-      anything, but they can interleave between batches and both get a `409`
-      part-way. Fixing that properly means a run id sent with every batch and a
-      slot keyed to it — a frontend change, deliberately not done yet.
+      anything, but they can interleave between batches and both get a `429`
+      part-way. The client retries it three times with backoff, so a brief
+      overlap usually resolves itself; a sustained one does not. Fixing that
+      properly means a run id sent with every batch and a slot keyed to it — a
+      frontend change, deliberately not done yet.
   - **A matched patient's empty contact columns are filled in, never
     overwritten.** `parent_name`, `address`, `city`, `phone` and `email` are
     copied from the card only where the stored patient holds `NULL`, so the

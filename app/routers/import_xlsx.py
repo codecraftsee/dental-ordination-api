@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from app.database import SessionLocal
 from app.dependencies import require_permission
@@ -31,11 +32,18 @@ logger = logging.getLogger(__name__)
 # no log line, and no `text/event-stream` for the frontend's SSE reader to
 # parse, which makes it look like a silent hang rather than an error.
 #
-# This is a safety net, not the intended path: the frontend batches uploads (see
-# MAX_FILES_PER_REQUEST in the docstring below). It stays finite because every
-# file in a request is held in memory twice — once in Starlette's spooled form,
-# once in `file_data` below. Caddy's `request_body max_size 100MB` is the real
-# ceiling; this only stops a pathological file *count* from getting that far.
+# A backstop against a non-browser caller, NOT a supported request size. The
+# frontend sends 50 files per request (MAX_FILES_PER_REQUEST, see the endpoint
+# docstring), so the real client is two orders of magnitude below this and the
+# number exists only so a scripted caller meets an honest error instead of the
+# silent hang described above.
+#
+# Kept at 5000 rather than lowered to something nearer the real traffic, for two
+# reasons. Caddy's `request_body max_size 100MB` already bounds the memory a
+# request can cost regardless of how the files divide up, so this only guards
+# against a pathological *count* of tiny files — where 5000 is cheap. And
+# anything below Starlette's own 1000 would make `_RaisedFileLimitRoute` tighten
+# the default rather than raise it, which is the opposite of what it exists for.
 MAX_IMPORT_FILES = 5000
 
 # How long the slot below may go untouched before another request may take it.
@@ -61,15 +69,26 @@ class _ImportSlot:
     lock, which has to be held on one dedicated connection for the whole run
     rather than the per-file sessions used here.
 
-    Releasing is the streaming generator's `finally`, with staleness as a
-    backstop. The backstop is not paranoia: Starlette builds the response before
-    it iterates the body, so a client that disappears in that window leaves a
-    generator that is collected without ever running its `finally`, and the slot
-    would be held until the container restarted.
+    Released three ways, in descending order of promptness:
+
+    1. The response's `BackgroundTask`, which Starlette awaits once the response
+       task group exits — on a client disconnect as much as on a completed body.
+       This is the one that matters for the frontend's Cancel button.
+    2. The generator's own `finally`, for exhaustion and errors.
+    3. The staleness takeover below, for the case where the generator never runs
+       at all: Starlette builds the response before it iterates the body, so a
+       client that disappears in *that* window leaves a generator collected
+       without its `finally` ever running.
+
+    (1) was added after measuring: with only (2) and (3), a cancelled run held
+    the slot for ~80 seconds — nothing closes a suspended generator promptly, so
+    it waited on the garbage collector. The frontend retries a batch three times
+    over about three seconds, so Cancel then Resume failed every time.
 
     Each acquisition gets a token, and `touch`/`release` are no-ops unless they
-    present the current one. Without that fencing, a holder that was declared
-    stale and taken over would release the slot out from under its successor.
+    present the current one. That fencing stops a holder declared stale and taken
+    over from releasing the slot out from under its successor, and makes the
+    double release from (1) and (2) harmless.
     """
 
     def __init__(self) -> None:
@@ -311,8 +330,10 @@ def _resolve_doctor(
     if override_doctor_id:
         return ResolvedDoctor(override_doctor_id, guessed=False)
 
-    # Nobody to attribute to. `_require_any_doctor` rejects the run before it
-    # starts, so this is only reachable if every doctor is deleted mid-run.
+    # Nobody to attribute to. `_doctor_index_for_run` refuses an empty index
+    # before the run starts, and the run then carries that same index all the
+    # way through, so this is unreachable in practice — it exists so the type
+    # stays honest rather than as a live branch.
     if not doctors.ids:
         return ResolvedDoctor(None, guessed=False)
 
@@ -546,12 +567,13 @@ def _import_workbook(
             )
         }
 
-    # Counted, not appended per row. `_require_any_doctor` makes this branch
-    # unreachable except in a race — every doctor deleted after the run started
-    # — but when it did fire it produced one error string per visit row per
-    # file. A 200-file batch turned into thousands of near-identical lines, all
-    # of which cross the SSE stream and are concatenated across batches by the
-    # frontend. One line per file says the same thing.
+    # Counted, not appended per row. `_doctor_index_for_run` refuses an empty
+    # index before the run starts and the run reuses that index throughout, so
+    # this branch no longer fires at all — but when it did, it produced one error
+    # string per visit row per file. A whole batch turned into thousands of
+    # near-identical lines, all of which cross the SSE stream and are
+    # concatenated across every batch of a run by the frontend. One line per
+    # file says the same thing.
     rows_without_doctor = 0
     rows_with_guessed_doctor = 0
     visit_rows_seen = 0
@@ -642,8 +664,8 @@ def _validate_override_doctor(doctor_id: str | None) -> str | None:
         db.close()
 
 
-def _require_any_doctor() -> None:
-    """Refuse the whole run when no doctor exists to attribute visits to.
+def _doctor_index_for_run(override_doctor_id: str | None) -> DoctorIndex:
+    """Load the index the whole run will use, refusing the run if it is unusable.
 
     `visits.doctor_id` is NOT NULL, so with an empty `DoctorIndex` every visit
     row hits the `no doctor` branch in `_import_workbook` and is dropped — while
@@ -654,22 +676,28 @@ def _require_any_doctor() -> None:
     default admin only and `app/seeds.py` never creates a doctor.
 
     Rejecting here, before the stream opens, is what makes it an error the user
-    reads instead of an empty `visits_created`. Only reachable when no
-    `doctor_id` override was supplied — that override is checked above and stands
-    in for the index entirely.
+    reads instead of an empty `visits_created`. A `doctor_id` override stands in
+    for the index entirely — `_resolve_doctor` returns it without consulting the
+    index — so an empty index is only fatal without one.
+
+    Loading here rather than inside the generator does two things. It halves the
+    queries this endpoint makes before streaming, which matters now the frontend
+    sends 50 files per request and a migration is ~160 of them. And it closes the
+    gap between checking and using: the index that was found non-empty is the
+    same object the run attributes visits with, so deleting the last doctor
+    mid-request can no longer turn a passing check into a run that drops every
+    visit it reads.
     """
-    db = SessionLocal()
-    try:
-        if db.query(User.id).filter(User.role == UserRole.DOCTOR).first() is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No doctors in the system. Create a user with the DOCTOR role, "
-                    "or pass doctor_id, before importing."
-                ),
-            )
-    finally:
-        db.close()
+    doctors = _load_doctor_index()
+    if not override_doctor_id and not doctors.ids:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No doctors in the system. Create a user with the DOCTOR role, "
+                "or pass doctor_id, before importing."
+            ),
+        )
+    return doctors
 
 
 @router.post("/xlsx")
@@ -693,10 +721,12 @@ async def import_xlsx_files(
     actually written to, as a subset of `patients_found`.
 
     Only one import runs at a time. A request arriving while another is in
-    progress is refused with a 409 rather than queued — waiting would mean
+    progress is refused with a **429** rather than queued — waiting would mean
     holding a second request's whole body in memory, which is what the limit
-    exists to prevent. Note that the frontend's batched run is many requests, so
-    the slot is claimed and released per batch, not for the run as a whole.
+    exists to prevent. 429 specifically, because the frontend retries that and
+    not a 409; see the comment at the raise. Note that the frontend's batched run
+    is many requests, so the slot is claimed and released per batch, not for the
+    run as a whole.
 
     If `doctor_id` is provided, that doctor is assigned to every imported visit,
     overriding per-row initial matching and the random fallback. If omitted, the
@@ -712,26 +742,43 @@ async def import_xlsx_files(
     - file_done: emitted after each file completes (success or per-file error)
     - complete: emitted once after all files are processed, with the full summary
 
-    Callers should send **at most 200 files per request** and repeat the call
-    per batch (the frontend's MAX_FILES_PER_REQUEST). A request is all-or-nothing
-    at the transport level: every file is buffered in memory for the whole run,
-    and a dropped connection loses the progress stream for everything still
-    queued behind it. Batching bounds both, and re-sending a batch is safe —
-    patients are matched on name plus date of birth and visits on their content,
-    so an already-imported file lands as `visits_skipped`, not as duplicates.
-    `MAX_IMPORT_FILES` above is the hard backstop, not the recommended size.
+    Callers should send **at most 50 files per request** and repeat the call per
+    batch — the frontend's `MAX_FILES_PER_REQUEST`, which is 50 as of its
+    `import-run-control` change (it was 200 before). That number is no longer
+    only about what this endpoint can take: it also bounds how much work a user's
+    Cancel throws away, how much a Resume has to re-send, and how long the
+    progress bar sits still while a batch uploads, since `fetch` cannot report
+    upload progress and nothing streams back until the whole body has arrived.
+
+    Every file in a request is buffered in memory for the whole run, and a
+    dropped connection abandons everything still queued behind the file in
+    flight. Batching bounds both. Re-sending a batch is safe — patients are
+    matched on name plus date of birth and visits on their content, so an
+    already-imported file lands as `visits_skipped`, not as duplicates.
+    `MAX_IMPORT_FILES` above is a backstop against a non-browser caller, not a
+    supported request size.
     """
     override_doctor_id = _validate_override_doctor(doctor_id)
-    if not override_doctor_id:
-        _require_any_doctor()
+    doctors = _doctor_index_for_run(override_doctor_id)
 
     # Claimed after validation, so a rejected request never occupies the slot,
     # and before the file reads, so a second import cannot buffer its copy of
     # the bodies alongside the first.
     slot_token = _IMPORT_SLOT.acquire()
     if slot_token is None:
+        # 429, not 409, and the difference is load-bearing. The frontend retries
+        # a batch only on status 0, 5xx, 408 and 429 (`isRetryableBatchError` in
+        # patient-import.service.ts) and records the batch's files as
+        # permanently failed on any other 4xx. This condition is the most
+        # transient one the endpoint has — "someone is mid-import, try shortly"
+        # — and it stays reachable from the client's own Cancel/Resume even with
+        # the background release in place: the slot is not freed until the file
+        # in flight finishes, so a Resume sent inside that window still lands
+        # here. It just has to be a status the client will try again.
+        # 409 also says "conflict with the resource's state", which this is not;
+        # nothing about the request is wrong and the same bytes work moments on.
         raise HTTPException(
-            status_code=409,
+            status_code=429,
             detail="An import is already running. Wait for it to finish and try again.",
         )
 
@@ -748,12 +795,16 @@ async def import_xlsx_files(
         _IMPORT_SLOT.release(slot_token)
         raise
 
+    # Visible to the background task below, which is the only place that runs on
+    # every ending this request can have — including the client hanging up.
+    run_state = {"files_done": 0, "reached_end": False}
+
     def generate():
         summary = {**_empty_counts(), "files_processed": 0, "errors": []}
 
         try:
             total = len(file_data)
-            doctors = _load_doctor_index()
+            logger.info("Import: starting, %d file(s)", total)
 
             for i, (filename, content) in enumerate(file_data):
                 # Proof of life for the slot's staleness check.
@@ -800,6 +851,7 @@ async def import_xlsx_files(
                         summary[key] += value
                 summary["errors"].extend(file_errors)
                 summary["files_processed"] += 1
+                run_state["files_done"] = summary["files_processed"]
 
                 yield _sse(
                     {
@@ -812,19 +864,62 @@ async def import_xlsx_files(
                     }
                 )
 
+            run_state["reached_end"] = True
             yield _sse({"type": "complete", "summary": summary})
 
         except Exception as e:
+            # Previously this vanished into the summary's errors and was never
+            # logged, so a run that died mid-way left the server silent.
+            logger.exception("Import: fatal error after %d file(s)", summary["files_processed"])
+            run_state["reached_end"] = True
             summary["errors"].append(f"Fatal error: {str(e)}")
             yield _sse({"type": "complete", "summary": summary})
 
         finally:
-            # Runs on exhaustion, on error, and on the GeneratorExit thrown in
-            # when a disconnecting client closes the stream part-way.
+            # Covers exhaustion and errors. It does NOT reliably cover a client
+            # disconnect: measured, a cancelled run held the slot for ~80s,
+            # because nothing closes this generator promptly — the suspended
+            # frame is only finalised when the garbage collector gets to it. The
+            # background task below is what makes the disconnect case
+            # deterministic; releasing twice is safe, since the token is stale
+            # after the first one.
             _IMPORT_SLOT.release(slot_token)
+
+    def _finish_run() -> None:
+        """Release the slot and record how the run ended.
+
+        This is the only place that runs on *every* ending this request has:
+        completion, a fatal error, and the client hanging up. Catching
+        `GeneratorExit` around the loop would not do it — that exception is not
+        delivered promptly, which is the same reason the release lives here.
+
+        Before this, an abandoned import left no server-side trace at all. A
+        cancel and a network drop are indistinguishable from here, and during a
+        migration either is worth seeing, so both log at warning.
+        """
+        _IMPORT_SLOT.release(slot_token)
+        if run_state["reached_end"]:
+            logger.info("Import: finished, %d file(s)", run_state["files_done"])
+        else:
+            logger.warning(
+                "Import: client disconnected after %d of %d file(s); the rest never started",
+                run_state["files_done"],
+                len(file_data),
+            )
 
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        # Starlette awaits `background` after the response's task group exits,
+        # and that group exits on `listen_for_disconnect` firing just as much as
+        # on the body being fully sent (starlette/responses.py, StreamingResponse
+        # .__call__). So this is the one hook that runs on *both* paths, and it
+        # is what frees the slot the moment a client hits Cancel.
+        #
+        # Without it the frontend's Cancel -> Resume is broken: it retries a
+        # batch 3 times over ~3s (MAX_BATCH_ATTEMPTS/RETRY_BASE_MS), against a
+        # slot that stayed held for ~80s, so every attempt got a 429 and the
+        # resumed run was recorded as failed.
+        background=BackgroundTask(_finish_run),
     )

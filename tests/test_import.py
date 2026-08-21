@@ -489,17 +489,62 @@ def test_rows_with_no_resolvable_doctor_collapse_to_one_error_per_file(client):
 
 
 def test_a_second_import_is_refused_while_one_is_running(client, admin_token, doctor):
-    """One import at a time: every file in a request stays in memory for the run."""
+    """One import at a time: every file in a request stays in memory for the run.
+
+    The status is 429 and must stay 429. The frontend retries a batch on status
+    0, 5xx, 408 and 429 only (`isRetryableBatchError`), and records the batch's
+    files as permanently failed on any other 4xx. Busy is transient — and
+    reachable from its own Cancel/Resume, which can land while the cancelled run
+    is still unwinding — so a non-retryable status here would turn a race into a
+    dead run.
+    """
     from app.routers.import_xlsx import _IMPORT_SLOT
 
     held = _IMPORT_SLOT.acquire()
     assert held is not None
     try:
         resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
-        assert resp.status_code == 409
+        assert resp.status_code == 429
         assert "already running" in resp.json()["detail"]
     finally:
         _IMPORT_SLOT.release(held)
+
+
+def test_the_response_carries_a_background_slot_release(client, admin_token, doctor):
+    """A client disconnect is only covered by the response's `BackgroundTask`.
+
+    Asserted structurally, on purpose. A mid-stream disconnect cannot be
+    reproduced through `TestClient`: it drives the app in-process and finalises
+    the generator promptly, so closing its stream early releases the slot even
+    with the background task removed — a behavioural test here passes either way
+    and would be worse than none.
+
+    The real behaviour was measured against a live uvicorn with a client that
+    hard-closes the socket. Before this task existed, a cancelled run held the
+    slot for ~80 seconds: nothing closes a suspended generator promptly, so its
+    `finally` waited on the garbage collector. The frontend retries a batch three
+    times over about three seconds, so Cancel then Resume failed every time.
+    """
+    import asyncio
+    from io import BytesIO
+
+    from fastapi import UploadFile
+
+    from app.routers.import_xlsx import _IMPORT_SLOT, import_xlsx_files
+
+    upload = UploadFile(file=BytesIO(_dental_card([VISIT_ROW])), filename="bg.xlsx")
+    resp = asyncio.run(import_xlsx_files(files=[upload], doctor_id=None, _=None))
+
+    assert resp.background is not None, "no BackgroundTask: a cancel would strand the slot"
+
+    # The call claimed the slot, and the generator is never iterated here, so
+    # the background task is the only thing that can hand it back.
+    assert _IMPORT_SLOT.acquire() is None
+    resp.background.func(*resp.background.args)
+
+    token = _IMPORT_SLOT.acquire()
+    assert token is not None, "the background task did not release the slot"
+    _IMPORT_SLOT.release(token)
 
 
 def test_the_slot_is_free_again_after_an_import_finishes(client, admin_token, doctor):
