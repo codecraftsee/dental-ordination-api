@@ -121,7 +121,33 @@ resource. The `doctors` table was merged into `users` and dropped.
   - Streams **Server-Sent Events** (`text/event-stream`) instead of returning a plain JSON response
   - Event types: `progress` (before each file), `file_done` (after each file), `complete` (final summary)
   - Frontend must consume via `fetch()` + `ReadableStream` (not `EventSource`, which is GET-only)
-  - Each file is committed/rolled back independently; errors appear in the event payload, not as HTTP errors
+  - Each file is committed/rolled back independently; per-file errors appear in
+    the event payload, not as HTTP errors. Validation that applies to the *whole
+    run* is the exception and happens before the stream opens, because once the
+    first byte is written the `200` is committed and a status code can no longer
+    be changed — an unknown `doctor_id` and the doctor check below both `400`
+    there.
+  - **Requires at least one `DOCTOR` user unless `doctor_id` is passed.**
+    `visits.doctor_id` is `NOT NULL` and `_resolve_doctor` returns `None` only
+    when no doctor exists at all, so an empty doctor table meant every visit row
+    was dropped while the patient header around it committed normally — a
+    reported-successful import that created patients with no visit history. That
+    ran on preprod for ~2500 files before anyone noticed, because `app/seeds.py`
+    seeds the default admin and never a doctor. `_require_any_doctor()` now
+    rejects the request with a `400` instead. Recovery is a re-import once a
+    doctor exists: patients match on name plus date of birth and are found, not
+    duplicated, and their empty visit histories fill in.
+  - **A visit whose doctor could not be identified is flagged, not invented.**
+    Attribution is by first-name initial; when that fails the row still gets an
+    arbitrary doctor, because `visits.doctor_id` is `NOT NULL`. That id is a
+    stand-in and must never read as fact, so the visit is marked
+    `import_incomplete` and reported in the summary. It counts as a guess when
+    the card names an initial nothing matches — no such doctor, or two share it
+    and `_load_doctor_index` dropped it rather than pick — and when the card
+    names nobody while several doctors exist. A single doctor in the system with
+    no initial on the row is the only possible answer, not a choice, so it is
+    not flagged; neither is an explicit `doctor_id`, where the caller has said
+    who it was.
   - **Capped at `MAX_IMPORT_FILES` (5000) files per request.** Starlette's
     multipart parser defaults to 1000 and FastAPI calls `request.form()` with no
     arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
@@ -134,6 +160,50 @@ resource. The `doctors` table was merged into `users` and dropped.
     Re-sending a batch is safe — patients match on name plus date of birth and
     visits on their content, so an already-imported file counts as
     `visits_skipped`, not a duplicate.
+  - **One import at a time.** A request arriving while another is in progress is
+    refused with a `409`, not queued — waiting would mean a second request
+    sitting on its whole body in memory, which is the thing being rationed. The
+    slot is in-process (`_ImportSlot`), which is exactly as wide as the process
+    it protects at `--workers 1`, and means a crash clears it rather than
+    stranding a lock. **Adding workers silently stops this guarding anything**;
+    the replacement is a Postgres advisory lock held on one dedicated connection
+    for the whole run, not the per-file sessions used today. The slot is
+    released by the streaming generator's `finally`, with a
+    `IMPORT_STALE_AFTER_SECONDS` (300) takeover as a backstop for the case where
+    the generator never runs at all — Starlette builds the response before it
+    iterates the body, so a client vanishing in that window would otherwise wedge
+    the endpoint until restart. Acquisitions are fenced with a token so a
+    displaced holder cannot release its successor's claim.
+    - Caveat: the frontend's batched run is *many* requests, so the slot is held
+      per batch, not per run. Two people importing at once will not corrupt
+      anything, but they can interleave between batches and both get a `409`
+      part-way. Fixing that properly means a run id sent with every batch and a
+      slot keyed to it — a frontend change, deliberately not done yet.
+  - **A matched patient's empty contact columns are filled in, never
+    overwritten.** `parent_name`, `address`, `city`, `phone` and `email` are
+    copied from the card only where the stored patient holds `NULL`, so the
+    first card to supply a value keeps it and a re-import cannot undo a
+    correction made in the UI. That also avoids having to decide which of two
+    hand-filled cards is newer — they carry nothing to answer it with.
+    `first_name`, `last_name` and `date_of_birth` are the match key, and
+    `gender` is `NOT NULL` with a documented default, so none of them is
+    fillable; a card that would correct a defaulted gender is an overwrite and
+    is left to the UI. `patients_updated` in the summary counts patients
+    actually written to, a subset of `patients_found`.
+  - **A card that yields no visit rows is reported**, not counted as a clean
+    import. A patient whose visit table is not where the parser expects it used
+    to produce a patient and silence — the one failure the summary could not
+    tell apart from an empty card. The count is taken on the row iterator, so a
+    re-import whose rows are all skipped as duplicates stays quiet. This also
+    covers `MIN_ROWS` (14) accepting a file that `FIRST_VISIT_ROW` (14, a
+    zero-based index) then finds nothing in.
+  - **Tooth numbers are validated against FDI notation** — `11-18`, `21-28`,
+    `31-38`, `41-48` permanent and `51-55`, `61-65`, `71-75`, `81-85` deciduous.
+    `TOOTH_REGEX` matches any digits after `d.`, so `"d. 2000"` used to be
+    stored as tooth 2000. Anything outside the set becomes `NULL`; the text is
+    kept verbatim in `diagnosis_notes` regardless, so declining to interpret it
+    loses nothing. Verified against the real cards first — every tooth number in
+    them is already inside the set.
   - Duplicate visit rows *within a single card* are still imported twice. The
     session sets `autoflush=False`, so the duplicate check only ever saw rows
     already committed. Longstanding behaviour, left alone deliberately.
@@ -170,6 +240,11 @@ Documented here so nobody assumes these already work.
 - Email: `admin@dentalclinic.com`
 - Password: `Test123#` (seeded on first startup if the user doesn't exist — see
   `run_startup_migrations()` in `app/main.py`)
+- **This admin is the only user seeded — no doctor is created.** A fresh
+  database therefore cannot import XLSX cards until somebody creates a `DOCTOR`
+  user, which the import endpoint now enforces rather than discovering
+  mid-import. Doctor matching is by first-name initial, so the names have to
+  match the initials written in the cards.
 
 ## Environment Variables (.env)
 

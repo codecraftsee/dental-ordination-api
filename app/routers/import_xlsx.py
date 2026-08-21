@@ -2,6 +2,8 @@ import json
 import logging
 import random
 import re
+import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -36,6 +38,73 @@ logger = logging.getLogger(__name__)
 # ceiling; this only stops a pathological file *count* from getting that far.
 MAX_IMPORT_FILES = 5000
 
+# How long the slot below may go untouched before another request may take it.
+# Every file refreshes it, and a card takes well under a second, so a live
+# import cannot look stale — this only ever fires on a holder that is gone.
+IMPORT_STALE_AFTER_SECONDS = 300
+
+
+class _ImportSlot:
+    """Single-occupancy slot: one import runs at a time, per process.
+
+    Every file in a request is held in memory for the whole run, so a second
+    concurrent import multiplies the peak — against one uvicorn worker
+    (`--workers 1`) and `pool_size=5` to a remote pooler, neither of which has
+    headroom for it. `acquire` refuses rather than waits: a queued import would
+    sit holding its entire request body in memory, which is the thing being
+    rationed in the first place.
+
+    In-process deliberately. It is exactly as wide as the process it protects,
+    which is right at one worker, and it means a crash or a restart clears it
+    instead of stranding a lock nobody owns. Adding workers would make this
+    silently stop guarding anything; the replacement is a Postgres advisory
+    lock, which has to be held on one dedicated connection for the whole run
+    rather than the per-file sessions used here.
+
+    Releasing is the streaming generator's `finally`, with staleness as a
+    backstop. The backstop is not paranoia: Starlette builds the response before
+    it iterates the body, so a client that disappears in that window leaves a
+    generator that is collected without ever running its `finally`, and the slot
+    would be held until the container restarted.
+
+    Each acquisition gets a token, and `touch`/`release` are no-ops unless they
+    present the current one. Without that fencing, a holder that was declared
+    stale and taken over would release the slot out from under its successor.
+    """
+
+    def __init__(self) -> None:
+        self._mutex = threading.Lock()
+        self._held = False
+        self._token = 0
+        self._last_activity = 0.0
+
+    def acquire(self) -> int | None:
+        """Claim the slot, returning a token, or None if somebody live holds it."""
+        with self._mutex:
+            if self._held and time.monotonic() - self._last_activity < IMPORT_STALE_AFTER_SECONDS:
+                return None
+            if self._held:
+                logger.warning(
+                    "Import: taking over a slot idle for >%ds", IMPORT_STALE_AFTER_SECONDS
+                )
+            self._token += 1
+            self._held = True
+            self._last_activity = time.monotonic()
+            return self._token
+
+    def touch(self, token: int) -> None:
+        with self._mutex:
+            if token == self._token:
+                self._last_activity = time.monotonic()
+
+    def release(self, token: int) -> None:
+        with self._mutex:
+            if token == self._token:
+                self._held = False
+
+
+_IMPORT_SLOT = _ImportSlot()
+
 
 class _RaisedFileLimitRoute(APIRoute):
     """Parse multipart bodies with `MAX_IMPORT_FILES` instead of Starlette's 1000.
@@ -62,6 +131,25 @@ class _RaisedFileLimitRoute(APIRoute):
 router = APIRouter(prefix="/api/import", tags=["import"], route_class=_RaisedFileLimitRoute)
 
 TOOTH_REGEX = re.compile(r"d\.?\s?(\d+)", re.IGNORECASE)
+
+# FDI notation: a quadrant digit (1-4 permanent, 5-8 deciduous) followed by the
+# tooth's position within it (1-8 permanent, 1-5 deciduous). TOOTH_REGEX matches
+# any run of digits after "d.", so without this "d. 2000" — a price that landed
+# in the diagnosis column, or a year in a note — is stored as tooth 2000.
+# Checked against the real cards before narrowing this: every tooth number in
+# them falls inside the set, so nothing legitimate is turned away.
+FDI_TEETH = frozenset(
+    {
+        *range(11, 19),
+        *range(21, 29),
+        *range(31, 39),
+        *range(41, 49),
+        *range(51, 56),
+        *range(61, 66),
+        *range(71, 76),
+        *range(81, 86),
+    }
+)
 
 # Layout of a dental card: patient details sit in column C (index 2) of rows
 # 3-11, and the visit table starts at row 15.
@@ -95,11 +183,20 @@ def parse_gender(value) -> Gender | None:
 
 
 def extract_tooth_number(diagnosis_text: str) -> int | None:
-    """Extract tooth number from diagnosis text using regex."""
+    """Extract an FDI tooth number from diagnosis text, or None.
+
+    Anything outside `FDI_TEETH` is discarded rather than stored: the digits
+    after "d." are not necessarily a tooth. The diagnosis text itself is kept
+    verbatim in `diagnosis_notes` either way, so nothing is lost by declining to
+    interpret it.
+    """
     if not diagnosis_text:
         return None
     match = TOOTH_REGEX.search(diagnosis_text)
-    return int(match.group(1)) if match else None
+    if not match:
+        return None
+    tooth = int(match.group(1))
+    return tooth if tooth in FDI_TEETH else None
 
 
 def parse_price(row: list, price_idx: int = 6, fallback_idx: int = 7) -> Decimal | None:
@@ -154,6 +251,7 @@ def _empty_counts() -> dict:
     return {
         "patients_created": 0,
         "patients_found": 0,
+        "patients_updated": 0,
         "visits_created": 0,
         "visits_skipped": 0,
         "patients_incomplete": 0,
@@ -195,19 +293,72 @@ def _load_doctor_index() -> DoctorIndex:
         db.close()
 
 
+class ResolvedDoctor(NamedTuple):
+    id: str | None
+    # Whether `id` identifies the doctor who actually did the work, or is only
+    # a stand-in that satisfies `visits.doctor_id`'s NOT NULL. A guessed id is
+    # fabricated clinical attribution, so the visit carrying it is flagged
+    # `import_incomplete` and reported — it must not read as fact.
+    guessed: bool
+
+
 def _resolve_doctor(
     override_doctor_id: str | None,
     doctor_initial: str | None,
     doctors: DoctorIndex,
-) -> str | None:
+) -> ResolvedDoctor:
     """A caller-supplied doctor wins, then an initial match, then any doctor."""
     if override_doctor_id:
-        return override_doctor_id
+        return ResolvedDoctor(override_doctor_id, guessed=False)
+
+    # Nobody to attribute to. `_require_any_doctor` rejects the run before it
+    # starts, so this is only reachable if every doctor is deleted mid-run.
+    if not doctors.ids:
+        return ResolvedDoctor(None, guessed=False)
+
     if doctor_initial:
         matched = doctors.by_initial.get(doctor_initial.upper())
         if matched:
-            return matched
-    return random.choice(doctors.ids) if doctors.ids else None
+            return ResolvedDoctor(matched, guessed=False)
+        # The card names somebody the index cannot identify: either no doctor
+        # has that initial, or two share it and `_load_doctor_index` dropped it
+        # rather than guess. Picking anyone here contradicts what the card says.
+        return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+
+    # The row names nobody. A single doctor in the system is the only possible
+    # answer rather than a choice between candidates, so it is not a guess.
+    if len(doctors.ids) == 1:
+        return ResolvedDoctor(doctors.ids[0], guessed=False)
+    return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+
+
+# The contact columns a later card may supply that an earlier one left empty.
+# The rest of the header is deliberately absent: first_name, last_name and
+# date_of_birth are the match key, so a difference there means a different
+# patient rather than a blank to fill; gender is NOT NULL and falls back to a
+# documented default, so it is never blank either — a card that corrects a
+# defaulted gender is an overwrite, which this is not.
+PATIENT_FILLABLE_FIELDS = ("parent_name", "address", "city", "phone", "email")
+
+
+def _fill_patient_blanks(patient: Patient, fields: dict) -> bool:
+    """Copy card values into columns the stored patient leaves empty.
+
+    Fill-only, never overwrite. Whichever card supplied a value first keeps it,
+    which is what makes this safe to run across an existing database: a
+    re-import cannot rewrite a phone number somebody has since corrected in the
+    UI, and no card has to be judged newer than another — a question these
+    hand-filled cards carry nothing to answer.
+
+    Returns whether anything changed, so the summary can distinguish a patient
+    that was merely matched from one that was actually written to.
+    """
+    filled = False
+    for name in PATIENT_FILLABLE_FIELDS:
+        if getattr(patient, name) is None and fields.get(name) is not None:
+            setattr(patient, name, fields[name])
+            filled = True
+    return filled
 
 
 class PatientHeader(NamedTuple):
@@ -366,6 +517,8 @@ def _import_workbook(
 
     if patient:
         counts["patients_found"] += 1
+        if _fill_patient_blanks(patient, header.fields):
+            counts["patients_updated"] += 1
     else:
         patient = Patient(**header.fields, import_incomplete=header.incomplete)
         db.add(patient)
@@ -393,10 +546,21 @@ def _import_workbook(
             )
         }
 
+    # Counted, not appended per row. `_require_any_doctor` makes this branch
+    # unreachable except in a race — every doctor deleted after the run started
+    # — but when it did fire it produced one error string per visit row per
+    # file. A 200-file batch turned into thousands of near-identical lines, all
+    # of which cross the SSE stream and are concatenated across batches by the
+    # frontend. One line per file says the same thing.
+    rows_without_doctor = 0
+    rows_with_guessed_doctor = 0
+    visit_rows_seen = 0
+
     for visit_row in _iter_visit_rows(rows):
-        doctor_id = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
-        if not doctor_id:
-            errors.append(f"{filename} row {visit_row.row_number}: No doctors in system, skipping")
+        visit_rows_seen += 1
+        resolved = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
+        if not resolved.id:
+            rows_without_doctor += 1
             continue
 
         # Deliberately not adding inserted rows to this set. The session sets
@@ -412,22 +576,49 @@ def _import_workbook(
             counts["visits_skipped"] += 1
             continue
 
+        # One flag, two causes: a missing price and an unidentified doctor both
+        # mean "a human needs to look at this row". `import_incomplete` is
+        # already what the UI's warning and PATCH .../dismiss-warning act on, so
+        # a guessed doctor rides the same path rather than inventing a second.
+        incomplete = visit_row.price is None or resolved.guessed
+
         db.add(
             Visit(
                 patient_id=patient.id,
-                doctor_id=doctor_id,
+                doctor_id=resolved.id,
                 date=visit_row.visit_date,
                 tooth_number=visit_row.tooth_number,
                 diagnosis_notes=visit_row.diagnosis_notes,
                 treatment_notes=visit_row.treatment_notes,
                 price=visit_row.price,
                 paid=True,
-                import_incomplete=visit_row.price is None,
+                import_incomplete=incomplete,
             )
         )
         counts["visits_created"] += 1
-        if visit_row.price is None:
+        if incomplete:
             counts["visits_incomplete"] += 1
+        if resolved.guessed:
+            rows_with_guessed_doctor += 1
+
+    # A card whose visit table is not where the parser expects it produces a
+    # patient and nothing else, and used to report clean success — the one
+    # failure mode the summary could not distinguish from an empty card. Counted
+    # on the iterator, not on `visits_created`, so a re-import of an already
+    # imported card stays silent: its rows are seen and then skipped as
+    # duplicates, which is a different thing from never finding any.
+    if visit_rows_seen == 0:
+        errors.append(f"{filename}: No visit rows found — check the file layout")
+
+    if rows_without_doctor:
+        errors.append(
+            f"{filename}: No doctors in system, skipped {rows_without_doctor} visit row(s)"
+        )
+    if rows_with_guessed_doctor:
+        errors.append(
+            f"{filename}: Could not identify the doctor for {rows_with_guessed_doctor} "
+            "visit row(s); assigned an arbitrary one and flagged them for review"
+        )
 
 
 def _validate_override_doctor(doctor_id: str | None) -> str | None:
@@ -451,6 +642,36 @@ def _validate_override_doctor(doctor_id: str | None) -> str | None:
         db.close()
 
 
+def _require_any_doctor() -> None:
+    """Refuse the whole run when no doctor exists to attribute visits to.
+
+    `visits.doctor_id` is NOT NULL, so with an empty `DoctorIndex` every visit
+    row hits the `no doctor` branch in `_import_workbook` and is dropped — while
+    the patient header around it commits normally. That failure is invisible at
+    a glance: the import reports success, patient counts climb, and the visit
+    history is silently discarded card after card. It happened on preprod for
+    ~2500 files before anybody noticed, because the database was seeded with the
+    default admin only and `app/seeds.py` never creates a doctor.
+
+    Rejecting here, before the stream opens, is what makes it an error the user
+    reads instead of an empty `visits_created`. Only reachable when no
+    `doctor_id` override was supplied — that override is checked above and stands
+    in for the index entirely.
+    """
+    db = SessionLocal()
+    try:
+        if db.query(User.id).filter(User.role == UserRole.DOCTOR).first() is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No doctors in the system. Create a user with the DOCTOR role, "
+                    "or pass doctor_id, before importing."
+                ),
+            )
+    finally:
+        db.close()
+
+
 @router.post("/xlsx")
 async def import_xlsx_files(
     files: list[UploadFile] = File(...),
@@ -466,9 +687,25 @@ async def import_xlsx_files(
     Each file creates/updates a patient and imports their visit history.
     Requires admin role.
 
+    A card matching an existing patient fills that patient's *empty* contact
+    columns and never overwrites one that already holds a value, so re-importing
+    cannot undo a correction made in the UI. `patients_updated` counts the ones
+    actually written to, as a subset of `patients_found`.
+
+    Only one import runs at a time. A request arriving while another is in
+    progress is refused with a 409 rather than queued — waiting would mean
+    holding a second request's whole body in memory, which is what the limit
+    exists to prevent. Note that the frontend's batched run is many requests, so
+    the slot is claimed and released per batch, not for the run as a whole.
+
     If `doctor_id` is provided, that doctor is assigned to every imported visit,
     overriding per-row initial matching and the random fallback. If omitted, the
-    original behaviour applies (match by first-name initial, fall back to random).
+    original behaviour applies (match by first-name initial, fall back to random)
+    and the system must contain at least one DOCTOR user — otherwise the request
+    is rejected with a 400 rather than importing patients whose visits would all
+    be dropped for want of anyone to attribute them to. A visit that falls back
+    to an arbitrary doctor is flagged `import_incomplete` and counted in the
+    summary's errors, so a fabricated attribution never reads as fact.
 
     Streams three event types:
     - progress: emitted before each file starts processing
@@ -485,14 +722,31 @@ async def import_xlsx_files(
     `MAX_IMPORT_FILES` above is the hard backstop, not the recommended size.
     """
     override_doctor_id = _validate_override_doctor(doctor_id)
+    if not override_doctor_id:
+        _require_any_doctor()
 
-    # Read all file contents eagerly before returning StreamingResponse.
-    # UploadFile handles are closed by FastAPI once the endpoint returns,
-    # so they cannot be awaited inside the generator.
-    file_data: list[tuple[str, bytes]] = []
-    for upload_file in files:
-        content = await upload_file.read()
-        file_data.append((upload_file.filename or "unknown", content))
+    # Claimed after validation, so a rejected request never occupies the slot,
+    # and before the file reads, so a second import cannot buffer its copy of
+    # the bodies alongside the first.
+    slot_token = _IMPORT_SLOT.acquire()
+    if slot_token is None:
+        raise HTTPException(
+            status_code=409,
+            detail="An import is already running. Wait for it to finish and try again.",
+        )
+
+    try:
+        # Read all file contents eagerly before returning StreamingResponse.
+        # UploadFile handles are closed by FastAPI once the endpoint returns,
+        # so they cannot be awaited inside the generator.
+        file_data: list[tuple[str, bytes]] = []
+        for upload_file in files:
+            content = await upload_file.read()
+            file_data.append((upload_file.filename or "unknown", content))
+    except BaseException:
+        # Nothing downstream will run its `finally` if this fails here.
+        _IMPORT_SLOT.release(slot_token)
+        raise
 
     def generate():
         summary = {**_empty_counts(), "files_processed": 0, "errors": []}
@@ -502,6 +756,9 @@ async def import_xlsx_files(
             doctors = _load_doctor_index()
 
             for i, (filename, content) in enumerate(file_data):
+                # Proof of life for the slot's staleness check.
+                _IMPORT_SLOT.touch(slot_token)
+
                 yield _sse(
                     {
                         "type": "progress",
@@ -560,6 +817,11 @@ async def import_xlsx_files(
         except Exception as e:
             summary["errors"].append(f"Fatal error: {str(e)}")
             yield _sse({"type": "complete", "summary": summary})
+
+        finally:
+            # Runs on exhaustion, on error, and on the GeneratorExit thrown in
+            # when a disconnecting client closes the stream part-way.
+            _IMPORT_SLOT.release(slot_token)
 
     return StreamingResponse(
         generate(),
