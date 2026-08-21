@@ -182,6 +182,7 @@ def _empty_counts() -> dict:
     return {
         "patients_created": 0,
         "patients_found": 0,
+        "patients_updated": 0,
         "visits_created": 0,
         "visits_skipped": 0,
         "patients_incomplete": 0,
@@ -260,6 +261,35 @@ def _resolve_doctor(
     if len(doctors.ids) == 1:
         return ResolvedDoctor(doctors.ids[0], guessed=False)
     return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+
+
+# The contact columns a later card may supply that an earlier one left empty.
+# The rest of the header is deliberately absent: first_name, last_name and
+# date_of_birth are the match key, so a difference there means a different
+# patient rather than a blank to fill; gender is NOT NULL and falls back to a
+# documented default, so it is never blank either — a card that corrects a
+# defaulted gender is an overwrite, which this is not.
+PATIENT_FILLABLE_FIELDS = ("parent_name", "address", "city", "phone", "email")
+
+
+def _fill_patient_blanks(patient: Patient, fields: dict) -> bool:
+    """Copy card values into columns the stored patient leaves empty.
+
+    Fill-only, never overwrite. Whichever card supplied a value first keeps it,
+    which is what makes this safe to run across an existing database: a
+    re-import cannot rewrite a phone number somebody has since corrected in the
+    UI, and no card has to be judged newer than another — a question these
+    hand-filled cards carry nothing to answer.
+
+    Returns whether anything changed, so the summary can distinguish a patient
+    that was merely matched from one that was actually written to.
+    """
+    filled = False
+    for name in PATIENT_FILLABLE_FIELDS:
+        if getattr(patient, name) is None and fields.get(name) is not None:
+            setattr(patient, name, fields[name])
+            filled = True
+    return filled
 
 
 class PatientHeader(NamedTuple):
@@ -418,6 +448,8 @@ def _import_workbook(
 
     if patient:
         counts["patients_found"] += 1
+        if _fill_patient_blanks(patient, header.fields):
+            counts["patients_updated"] += 1
     else:
         patient = Patient(**header.fields, import_incomplete=header.incomplete)
         db.add(patient)
@@ -585,6 +617,11 @@ async def import_xlsx_files(
 
     Each file creates/updates a patient and imports their visit history.
     Requires admin role.
+
+    A card matching an existing patient fills that patient's *empty* contact
+    columns and never overwrites one that already holds a value, so re-importing
+    cannot undo a correction made in the UI. `patients_updated` counts the ones
+    actually written to, as a subset of `patients_found`.
 
     If `doctor_id` is provided, that doctor is assigned to every imported visit,
     overriding per-row initial matching and the random fallback. If omitted, the

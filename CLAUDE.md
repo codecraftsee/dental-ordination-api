@@ -160,6 +160,17 @@ resource. The `doctors` table was merged into `users` and dropped.
     Re-sending a batch is safe — patients match on name plus date of birth and
     visits on their content, so an already-imported file counts as
     `visits_skipped`, not a duplicate.
+  - **A matched patient's empty contact columns are filled in, never
+    overwritten.** `parent_name`, `address`, `city`, `phone` and `email` are
+    copied from the card only where the stored patient holds `NULL`, so the
+    first card to supply a value keeps it and a re-import cannot undo a
+    correction made in the UI. That also avoids having to decide which of two
+    hand-filled cards is newer — they carry nothing to answer it with.
+    `first_name`, `last_name` and `date_of_birth` are the match key, and
+    `gender` is `NOT NULL` with a documented default, so none of them is
+    fillable; a card that would correct a defaulted gender is an overwrite and
+    is left to the UI. `patients_updated` in the summary counts patients
+    actually written to, a subset of `patients_found`.
   - **A card that yields no visit rows is reported**, not counted as a clean
     import. A patient whose visit table is not where the parser expects it used
     to produce a patient and silence — the one failure the summary could not

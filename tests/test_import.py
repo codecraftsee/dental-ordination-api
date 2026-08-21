@@ -35,22 +35,28 @@ def _dental_card(
     dob: str = "01.02.1990.",
     first_name: str = "Marko",
     last_name: str = "Petrovic",
+    parent_name: str | None = "Jovan",
+    address: str | None = "Glavna 1",
+    city: str | None = "Novi Sad",
+    phone: str | None = "0601234567",
+    email: str | None = "marko@dental-test.com",
 ) -> bytes:
     """A dental card in the layout the importer expects.
 
     Patient details sit in column C of rows 3-11 (indices 2-10), and visit rows
-    start at index 14.
+    start at index 14. The contact fields are overridable — `None` leaves the
+    cell empty, which is how a card that simply does not record one looks.
     """
     rows: list[list] = [[] for _ in range(14)]
     rows[2] = [None, "Pol", gender]
     rows[3] = [None, "Prezime", last_name]
     rows[4] = [None, "Ime", first_name]
-    rows[5] = [None, "Roditelj", "Jovan"]
+    rows[5] = [None, "Roditelj", parent_name]
     rows[6] = [None, "Datum rodjenja", dob]
-    rows[7] = [None, "Adresa", "Glavna 1"]
-    rows[8] = [None, "Grad", "Novi Sad"]
-    rows[9] = [None, "Telefon", "0601234567"]
-    rows[10] = [None, "Email", "marko@dental-test.com"]
+    rows[7] = [None, "Adresa", address]
+    rows[8] = [None, "Grad", city]
+    rows[9] = [None, "Telefon", phone]
+    rows[10] = [None, "Email", email]
     rows[13] = ["Datum", None, "Dijagnoza", None, "Terapija", "Dr", "Cena"]
     return _build_xlsx(rows + visit_rows)
 
@@ -221,6 +227,54 @@ def test_a_file_with_too_few_rows_is_reported(client, admin_token, doctor):
 
     assert summary["patients_created"] == 0
     assert any("File too short" in e for e in summary["errors"])
+
+
+def test_a_later_card_fills_a_blank_field_on_a_matched_patient(client, admin_token, doctor):
+    """The first card had no phone; the second supplies one."""
+    _post(client, admin_token, _dental_card([VISIT_ROW], phone=None))
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW], phone="0605555555"))
+    summary = _events(resp)[-1]["summary"]
+
+    assert summary["patients_found"] == 1
+    assert summary["patients_created"] == 0
+    assert summary["patients_updated"] == 1
+
+    patients = client.get("/api/patients", headers=auth(admin_token)).json()
+    assert len(patients) == 1
+    assert patients[0]["phone"] == "0605555555"
+
+
+def test_a_later_card_never_overwrites_a_field_that_has_a_value(client, admin_token, doctor):
+    """Fill-only. The first value wins, so a re-import cannot undo a correction."""
+    _post(client, admin_token, _dental_card([VISIT_ROW], phone="0601111111"))
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW], phone="0602222222"))
+    summary = _events(resp)[-1]["summary"]
+
+    assert summary["patients_found"] == 1
+    assert summary["patients_updated"] == 0
+
+    patients = client.get("/api/patients", headers=auth(admin_token)).json()
+    assert patients[0]["phone"] == "0601111111"
+
+
+def test_re_importing_an_identical_card_reports_no_update(client, admin_token, doctor):
+    """patients_updated counts writes, not matches — nothing changed here."""
+    card = _dental_card([VISIT_ROW])
+    _post(client, admin_token, card)
+    summary = _events(_post(client, admin_token, card))[-1]["summary"]
+
+    assert summary["patients_found"] == 1
+    assert summary["patients_updated"] == 0
+
+
+def test_filling_blanks_leaves_the_match_key_and_gender_alone(client, admin_token, doctor):
+    """A card differing only in gender must not rewrite the stored patient."""
+    _post(client, admin_token, _dental_card([VISIT_ROW], gender="m"))
+    _post(client, admin_token, _dental_card([VISIT_ROW], gender="z"))
+
+    patients = client.get("/api/patients", headers=auth(admin_token)).json()
+    assert len(patients) == 1
+    assert patients[0]["gender"] == "male"
 
 
 def test_a_card_with_no_visit_rows_is_reported(client, admin_token, doctor):
