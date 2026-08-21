@@ -172,13 +172,26 @@ resource. The `doctors` table was merged into `users` and dropped.
     it protects at `--workers 1`, and means a crash clears it rather than
     stranding a lock. **Adding workers silently stops this guarding anything**;
     the replacement is a Postgres advisory lock held on one dedicated connection
-    for the whole run, not the per-file sessions used today. The slot is
-    released by the streaming generator's `finally`, with a
-    `IMPORT_STALE_AFTER_SECONDS` (300) takeover as a backstop for the case where
-    the generator never runs at all — Starlette builds the response before it
-    iterates the body, so a client vanishing in that window would otherwise wedge
-    the endpoint until restart. Acquisitions are fenced with a token so a
-    displaced holder cannot release its successor's claim.
+    for the whole run, not the per-file sessions used today. Acquisitions are
+    fenced with a token so a displaced holder cannot release its successor's
+    claim, and so the overlapping releases below are harmless.
+    - **The slot is released three ways**, and the first one is load-bearing:
+      the response's `BackgroundTask`, which Starlette awaits once the response
+      task group exits — on a client disconnect just as much as on a fully sent
+      body; the generator's own `finally`, for exhaustion and errors; and the
+      `IMPORT_STALE_AFTER_SECONDS` (300) takeover, for the case where the
+      generator never runs at all, since Starlette builds the response before it
+      iterates the body.
+    - **Do not remove the `BackgroundTask`.** Measured against a live uvicorn
+      with a client that hard-closes the socket: without it a cancelled run held
+      the slot for **~80 seconds**, because nothing closes a suspended generator
+      promptly — its `finally` waits on the garbage collector — and the
+      staleness takeover is far too slow to help. The frontend retries a batch
+      three times over ~3 seconds, so Cancel then Resume failed every time. With
+      it, the slot frees in **~0.3s**, the residual being the in-flight file
+      finishing. A `TestClient` test cannot catch a regression here (it
+      finalises the generator in-process), so the guard is the structural
+      assertion in `test_the_response_carries_a_background_slot_release`.
     - Caveat: the frontend's batched run is *many* requests, so the slot is held
       per batch, not per run. Two people importing at once will not corrupt
       anything, but they can interleave between batches and both get a `429`

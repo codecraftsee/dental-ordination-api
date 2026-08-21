@@ -510,6 +510,39 @@ def test_a_second_import_is_refused_while_one_is_running(client, admin_token, do
         _IMPORT_SLOT.release(held)
 
 
+def test_the_response_carries_a_background_slot_release(client, admin_token, doctor):
+    """A client disconnect is only covered by the response's `BackgroundTask`.
+
+    Asserted structurally, on purpose. A mid-stream disconnect cannot be
+    reproduced through `TestClient`: it drives the app in-process and finalises
+    the generator promptly, so closing its stream early releases the slot even
+    with the background task removed — a behavioural test here passes either way
+    and would be worse than none.
+
+    The real behaviour was measured against a live uvicorn with a client that
+    hard-closes the socket. Before this task existed, a cancelled run held the
+    slot for ~80 seconds: nothing closes a suspended generator promptly, so its
+    `finally` waited on the garbage collector. The frontend retries a batch three
+    times over about three seconds, so Cancel then Resume failed every time.
+    """
+    import asyncio
+    from io import BytesIO
+
+    from fastapi import UploadFile
+
+    from app.routers.import_xlsx import _IMPORT_SLOT, import_xlsx_files
+
+    upload = UploadFile(file=BytesIO(_dental_card([VISIT_ROW])), filename="bg.xlsx")
+    resp = asyncio.run(import_xlsx_files(files=[upload], doctor_id=None, _=None))
+    try:
+        assert resp.background is not None, "no BackgroundTask: a cancel would strand the slot"
+        assert resp.background.func == _IMPORT_SLOT.release
+    finally:
+        # The call above claimed the slot and the generator is never iterated,
+        # so nothing else would ever give it back.
+        resp.background.func(*resp.background.args)
+
+
 def test_the_slot_is_free_again_after_an_import_finishes(client, admin_token, doctor):
     """A leaked slot would wedge the endpoint until the container restarted."""
     assert _post(client, admin_token, _dental_card([VISIT_ROW])).status_code == 200

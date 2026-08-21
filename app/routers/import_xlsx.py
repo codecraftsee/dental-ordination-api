@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from app.database import SessionLocal
 from app.dependencies import require_permission
@@ -61,15 +62,26 @@ class _ImportSlot:
     lock, which has to be held on one dedicated connection for the whole run
     rather than the per-file sessions used here.
 
-    Releasing is the streaming generator's `finally`, with staleness as a
-    backstop. The backstop is not paranoia: Starlette builds the response before
-    it iterates the body, so a client that disappears in that window leaves a
-    generator that is collected without ever running its `finally`, and the slot
-    would be held until the container restarted.
+    Released three ways, in descending order of promptness:
+
+    1. The response's `BackgroundTask`, which Starlette awaits once the response
+       task group exits — on a client disconnect as much as on a completed body.
+       This is the one that matters for the frontend's Cancel button.
+    2. The generator's own `finally`, for exhaustion and errors.
+    3. The staleness takeover below, for the case where the generator never runs
+       at all: Starlette builds the response before it iterates the body, so a
+       client that disappears in *that* window leaves a generator collected
+       without its `finally` ever running.
+
+    (1) was added after measuring: with only (2) and (3), a cancelled run held
+    the slot for ~80 seconds — nothing closes a suspended generator promptly, so
+    it waited on the garbage collector. The frontend retries a batch three times
+    over about three seconds, so Cancel then Resume failed every time.
 
     Each acquisition gets a token, and `touch`/`release` are no-ops unless they
-    present the current one. Without that fencing, a holder that was declared
-    stale and taken over would release the slot out from under its successor.
+    present the current one. That fencing stops a holder declared stale and taken
+    over from releasing the slot out from under its successor, and makes the
+    double release from (1) and (2) harmless.
     """
 
     def __init__(self) -> None:
@@ -832,12 +844,28 @@ async def import_xlsx_files(
             yield _sse({"type": "complete", "summary": summary})
 
         finally:
-            # Runs on exhaustion, on error, and on the GeneratorExit thrown in
-            # when a disconnecting client closes the stream part-way.
+            # Covers exhaustion and errors. It does NOT reliably cover a client
+            # disconnect: measured, a cancelled run held the slot for ~80s,
+            # because nothing closes this generator promptly — the suspended
+            # frame is only finalised when the garbage collector gets to it. The
+            # background task below is what makes the disconnect case
+            # deterministic; releasing twice is safe, since the token is stale
+            # after the first one.
             _IMPORT_SLOT.release(slot_token)
 
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        # Starlette awaits `background` after the response's task group exits,
+        # and that group exits on `listen_for_disconnect` firing just as much as
+        # on the body being fully sent (starlette/responses.py, StreamingResponse
+        # .__call__). So this is the one hook that runs on *both* paths, and it
+        # is what frees the slot the moment a client hits Cancel.
+        #
+        # Without it the frontend's Cancel -> Resume is broken: it retries a
+        # batch 3 times over ~3s (MAX_BATCH_ATTEMPTS/RETRY_BASE_MS), against a
+        # slot that stayed held for ~80s, so every attempt got a 429 and the
+        # resumed run was recorded as failed.
+        background=BackgroundTask(_IMPORT_SLOT.release, slot_token),
     )
