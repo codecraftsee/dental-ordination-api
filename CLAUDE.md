@@ -161,8 +161,13 @@ resource. The `doctors` table was merged into `users` and dropped.
     visits on their content, so an already-imported file counts as
     `visits_skipped`, not a duplicate.
   - **One import at a time.** A request arriving while another is in progress is
-    refused with a `409`, not queued — waiting would mean a second request
+    refused with a **`429`**, not queued — waiting would mean a second request
     sitting on its whole body in memory, which is the thing being rationed. The
+    status must stay `429`: the frontend retries a batch on status 0, 5xx, 408
+    and 429 only (`isRetryableBatchError` in `patient-import.service.ts`) and
+    records the files as permanently failed on any other 4xx. Busy is transient
+    and is reachable from the client's own Cancel/Resume, so a `409` here — which
+    is what this originally returned — turns a race into a dead run. The
     slot is in-process (`_ImportSlot`), which is exactly as wide as the process
     it protects at `--workers 1`, and means a crash clears it rather than
     stranding a lock. **Adding workers silently stops this guarding anything**;
@@ -176,9 +181,11 @@ resource. The `doctors` table was merged into `users` and dropped.
     displaced holder cannot release its successor's claim.
     - Caveat: the frontend's batched run is *many* requests, so the slot is held
       per batch, not per run. Two people importing at once will not corrupt
-      anything, but they can interleave between batches and both get a `409`
-      part-way. Fixing that properly means a run id sent with every batch and a
-      slot keyed to it — a frontend change, deliberately not done yet.
+      anything, but they can interleave between batches and both get a `429`
+      part-way. The client retries it three times with backoff, so a brief
+      overlap usually resolves itself; a sustained one does not. Fixing that
+      properly means a run id sent with every batch and a slot keyed to it — a
+      frontend change, deliberately not done yet.
   - **A matched patient's empty contact columns are filled in, never
     overwritten.** `parent_name`, `address`, `city`, `phone` and `email` are
     copied from the card only where the stored patient holds `NULL`, so the

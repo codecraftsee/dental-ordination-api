@@ -693,10 +693,12 @@ async def import_xlsx_files(
     actually written to, as a subset of `patients_found`.
 
     Only one import runs at a time. A request arriving while another is in
-    progress is refused with a 409 rather than queued — waiting would mean
+    progress is refused with a **429** rather than queued — waiting would mean
     holding a second request's whole body in memory, which is what the limit
-    exists to prevent. Note that the frontend's batched run is many requests, so
-    the slot is claimed and released per batch, not for the run as a whole.
+    exists to prevent. 429 specifically, because the frontend retries that and
+    not a 409; see the comment at the raise. Note that the frontend's batched run
+    is many requests, so the slot is claimed and released per batch, not for the
+    run as a whole.
 
     If `doctor_id` is provided, that doctor is assigned to every imported visit,
     overriding per-row initial matching and the random fallback. If omitted, the
@@ -730,8 +732,19 @@ async def import_xlsx_files(
     # the bodies alongside the first.
     slot_token = _IMPORT_SLOT.acquire()
     if slot_token is None:
+        # 429, not 409, and the difference is load-bearing. The frontend retries
+        # a batch only on status 0, 5xx, 408 and 429 (`isRetryableBatchError` in
+        # patient-import.service.ts) and records the batch's files as
+        # permanently failed on any other 4xx. This condition is the most
+        # transient one the endpoint has — "someone is mid-import, try shortly"
+        # — and it is reachable from the client's own Cancel/Resume: the slot is
+        # freed by the generator's `finally`, which does not run until the
+        # in-flight file finishes, so a quick Resume can land while the
+        # cancelled run is still unwinding. A 409 there would kill the resume
+        # outright. 409 also says "conflict with the resource's state", which
+        # this is not; nothing about the request is wrong.
         raise HTTPException(
-            status_code=409,
+            status_code=429,
             detail="An import is already running. Wait for it to finish and try again.",
         )
 

@@ -489,14 +489,22 @@ def test_rows_with_no_resolvable_doctor_collapse_to_one_error_per_file(client):
 
 
 def test_a_second_import_is_refused_while_one_is_running(client, admin_token, doctor):
-    """One import at a time: every file in a request stays in memory for the run."""
+    """One import at a time: every file in a request stays in memory for the run.
+
+    The status is 429 and must stay 429. The frontend retries a batch on status
+    0, 5xx, 408 and 429 only (`isRetryableBatchError`), and records the batch's
+    files as permanently failed on any other 4xx. Busy is transient — and
+    reachable from its own Cancel/Resume, which can land while the cancelled run
+    is still unwinding — so a non-retryable status here would turn a race into a
+    dead run.
+    """
     from app.routers.import_xlsx import _IMPORT_SLOT
 
     held = _IMPORT_SLOT.acquire()
     assert held is not None
     try:
         resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
-        assert resp.status_code == 409
+        assert resp.status_code == 429
         assert "already running" in resp.json()["detail"]
     finally:
         _IMPORT_SLOT.release(held)
