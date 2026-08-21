@@ -261,13 +261,68 @@ def test_an_ambiguous_initial_falls_back_instead_of_guessing(client, admin_token
     assert visits[0]["doctor_id"] in {milan.id, marko.id}
 
 
-def test_import_with_no_doctors_in_the_system_reports_it(client, admin_token):
-    """No `doctor` fixture here: there is nobody to assign visits to."""
-    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1]["summary"]
+def test_import_with_no_doctors_in_the_system_is_rejected_before_streaming(client, admin_token):
+    """No `doctor` fixture here: there is nobody to assign visits to.
 
-    assert summary["patients_created"] == 1
-    assert summary["visits_created"] == 0
-    assert any("No doctors in system" in e for e in summary["errors"])
+    This used to stream a 200, create the patient, and drop every visit row with
+    an error buried in the summary. On preprod that imported ~2500 patients with
+    no visit history at all before anyone noticed, so the run is now refused
+    outright — and the patient must not land either.
+    """
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    assert resp.status_code == 400
+    assert "No doctors in the system" in resp.json()["detail"]
+    assert client.get("/api/patients", headers=auth(admin_token)).json() == []
+
+
+def test_an_explicit_doctor_id_still_imports_when_it_is_the_only_doctor(
+    client, admin_token, make_user
+):
+    """The guard defers to an override: that id is what visits get attributed to."""
+    from app.models.user import UserRole
+
+    only = make_user(role=UserRole.DOCTOR, first_name="Filip")
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW]), doctor_id=only.id)
+
+    assert resp.status_code == 200
+    assert _events(resp)[-1]["summary"]["visits_created"] == 1
+
+
+def test_rows_with_no_resolvable_doctor_collapse_to_one_error_per_file(client):
+    """The skipped-row error is counted per file, not appended per row.
+
+    Unreachable through the endpoint now that the guard rejects an empty index,
+    so this drives `_import_workbook` directly. It fired once per visit row
+    before, which turned a 200-file batch into thousands of identical lines
+    crossing the SSE stream and being concatenated across batches by the client.
+    """
+    from app.database import SessionLocal
+    from app.routers.import_xlsx import DoctorIndex, _empty_counts, _import_workbook
+
+    three_rows = [
+        VISIT_ROW,
+        ["02.03.2024.", None, "Caries d.17", None, "Extraction", "M", "5.000,00 din"],
+        ["03.03.2024.", None, "Caries d.18", None, "Cleaning", "M", "6.000,00 din"],
+    ]
+
+    errors: list[str] = []
+    db = SessionLocal()
+    try:
+        _import_workbook(
+            db,
+            "card.xlsx",
+            _dental_card(three_rows),
+            DoctorIndex([], {}),
+            None,
+            _empty_counts(),
+            errors,
+        )
+    finally:
+        db.rollback()
+        db.close()
+
+    assert errors == ["card.xlsx: No doctors in system, skipped 3 visit row(s)"]
 
 
 def test_an_unknown_doctor_id_is_rejected_before_streaming(client, admin_token):

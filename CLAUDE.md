@@ -121,7 +121,22 @@ resource. The `doctors` table was merged into `users` and dropped.
   - Streams **Server-Sent Events** (`text/event-stream`) instead of returning a plain JSON response
   - Event types: `progress` (before each file), `file_done` (after each file), `complete` (final summary)
   - Frontend must consume via `fetch()` + `ReadableStream` (not `EventSource`, which is GET-only)
-  - Each file is committed/rolled back independently; errors appear in the event payload, not as HTTP errors
+  - Each file is committed/rolled back independently; per-file errors appear in
+    the event payload, not as HTTP errors. Validation that applies to the *whole
+    run* is the exception and happens before the stream opens, because once the
+    first byte is written the `200` is committed and a status code can no longer
+    be changed — an unknown `doctor_id` and the doctor check below both `400`
+    there.
+  - **Requires at least one `DOCTOR` user unless `doctor_id` is passed.**
+    `visits.doctor_id` is `NOT NULL` and `_resolve_doctor` returns `None` only
+    when no doctor exists at all, so an empty doctor table meant every visit row
+    was dropped while the patient header around it committed normally — a
+    reported-successful import that created patients with no visit history. That
+    ran on preprod for ~2500 files before anyone noticed, because `app/seeds.py`
+    seeds the default admin and never a doctor. `_require_any_doctor()` now
+    rejects the request with a `400` instead. Recovery is a re-import once a
+    doctor exists: patients match on name plus date of birth and are found, not
+    duplicated, and their empty visit histories fill in.
   - **Capped at `MAX_IMPORT_FILES` (5000) files per request.** Starlette's
     multipart parser defaults to 1000 and FastAPI calls `request.form()` with no
     arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
@@ -170,6 +185,11 @@ Documented here so nobody assumes these already work.
 - Email: `admin@dentalclinic.com`
 - Password: `Test123#` (seeded on first startup if the user doesn't exist — see
   `run_startup_migrations()` in `app/main.py`)
+- **This admin is the only user seeded — no doctor is created.** A fresh
+  database therefore cannot import XLSX cards until somebody creates a `DOCTOR`
+  user, which the import endpoint now enforces rather than discovering
+  mid-import. Doctor matching is by first-name initial, so the names have to
+  match the initials written in the cards.
 
 ## Environment Variables (.env)
 

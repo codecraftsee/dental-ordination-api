@@ -393,10 +393,18 @@ def _import_workbook(
             )
         }
 
+    # Counted, not appended per row. `_require_any_doctor` makes this branch
+    # unreachable except in a race — every doctor deleted after the run started
+    # — but when it did fire it produced one error string per visit row per
+    # file. A 200-file batch turned into thousands of near-identical lines, all
+    # of which cross the SSE stream and are concatenated across batches by the
+    # frontend. One line per file says the same thing.
+    rows_without_doctor = 0
+
     for visit_row in _iter_visit_rows(rows):
         doctor_id = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
         if not doctor_id:
-            errors.append(f"{filename} row {visit_row.row_number}: No doctors in system, skipping")
+            rows_without_doctor += 1
             continue
 
         # Deliberately not adding inserted rows to this set. The session sets
@@ -429,6 +437,11 @@ def _import_workbook(
         if visit_row.price is None:
             counts["visits_incomplete"] += 1
 
+    if rows_without_doctor:
+        errors.append(
+            f"{filename}: No doctors in system, skipped {rows_without_doctor} visit row(s)"
+        )
+
 
 def _validate_override_doctor(doctor_id: str | None) -> str | None:
     """Check a caller-supplied doctor_id before the response starts streaming.
@@ -451,6 +464,36 @@ def _validate_override_doctor(doctor_id: str | None) -> str | None:
         db.close()
 
 
+def _require_any_doctor() -> None:
+    """Refuse the whole run when no doctor exists to attribute visits to.
+
+    `visits.doctor_id` is NOT NULL, so with an empty `DoctorIndex` every visit
+    row hits the `no doctor` branch in `_import_workbook` and is dropped — while
+    the patient header around it commits normally. That failure is invisible at
+    a glance: the import reports success, patient counts climb, and the visit
+    history is silently discarded card after card. It happened on preprod for
+    ~2500 files before anybody noticed, because the database was seeded with the
+    default admin only and `app/seeds.py` never creates a doctor.
+
+    Rejecting here, before the stream opens, is what makes it an error the user
+    reads instead of an empty `visits_created`. Only reachable when no
+    `doctor_id` override was supplied — that override is checked above and stands
+    in for the index entirely.
+    """
+    db = SessionLocal()
+    try:
+        if db.query(User.id).filter(User.role == UserRole.DOCTOR).first() is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No doctors in the system. Create a user with the DOCTOR role, "
+                    "or pass doctor_id, before importing."
+                ),
+            )
+    finally:
+        db.close()
+
+
 @router.post("/xlsx")
 async def import_xlsx_files(
     files: list[UploadFile] = File(...),
@@ -468,7 +511,10 @@ async def import_xlsx_files(
 
     If `doctor_id` is provided, that doctor is assigned to every imported visit,
     overriding per-row initial matching and the random fallback. If omitted, the
-    original behaviour applies (match by first-name initial, fall back to random).
+    original behaviour applies (match by first-name initial, fall back to random)
+    and the system must contain at least one DOCTOR user — otherwise the request
+    is rejected with a 400 rather than importing patients whose visits would all
+    be dropped for want of anyone to attribute them to.
 
     Streams three event types:
     - progress: emitted before each file starts processing
@@ -485,6 +531,8 @@ async def import_xlsx_files(
     `MAX_IMPORT_FILES` above is the hard backstop, not the recommended size.
     """
     override_doctor_id = _validate_override_doctor(doctor_id)
+    if not override_doctor_id:
+        _require_any_doctor()
 
     # Read all file contents eagerly before returning StreamingResponse.
     # UploadFile handles are closed by FastAPI once the endpoint returns,
