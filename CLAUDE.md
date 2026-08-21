@@ -160,6 +160,20 @@ resource. The `doctors` table was merged into `users` and dropped.
     Re-sending a batch is safe — patients match on name plus date of birth and
     visits on their content, so an already-imported file counts as
     `visits_skipped`, not a duplicate.
+  - **A card that yields no visit rows is reported**, not counted as a clean
+    import. A patient whose visit table is not where the parser expects it used
+    to produce a patient and silence — the one failure the summary could not
+    tell apart from an empty card. The count is taken on the row iterator, so a
+    re-import whose rows are all skipped as duplicates stays quiet. This also
+    covers `MIN_ROWS` (14) accepting a file that `FIRST_VISIT_ROW` (14, a
+    zero-based index) then finds nothing in.
+  - **Tooth numbers are validated against FDI notation** — `11-18`, `21-28`,
+    `31-38`, `41-48` permanent and `51-55`, `61-65`, `71-75`, `81-85` deciduous.
+    `TOOTH_REGEX` matches any digits after `d.`, so `"d. 2000"` used to be
+    stored as tooth 2000. Anything outside the set becomes `NULL`; the text is
+    kept verbatim in `diagnosis_notes` regardless, so declining to interpret it
+    loses nothing. Verified against the real cards first — every tooth number in
+    them is already inside the set.
   - Duplicate visit rows *within a single card* are still imported twice. The
     session sets `autoflush=False`, so the duplicate check only ever saw rows
     already committed. Longstanding behaviour, left alone deliberately.

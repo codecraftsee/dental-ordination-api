@@ -63,6 +63,25 @@ router = APIRouter(prefix="/api/import", tags=["import"], route_class=_RaisedFil
 
 TOOTH_REGEX = re.compile(r"d\.?\s?(\d+)", re.IGNORECASE)
 
+# FDI notation: a quadrant digit (1-4 permanent, 5-8 deciduous) followed by the
+# tooth's position within it (1-8 permanent, 1-5 deciduous). TOOTH_REGEX matches
+# any run of digits after "d.", so without this "d. 2000" — a price that landed
+# in the diagnosis column, or a year in a note — is stored as tooth 2000.
+# Checked against the real cards before narrowing this: every tooth number in
+# them falls inside the set, so nothing legitimate is turned away.
+FDI_TEETH = frozenset(
+    {
+        *range(11, 19),
+        *range(21, 29),
+        *range(31, 39),
+        *range(41, 49),
+        *range(51, 56),
+        *range(61, 66),
+        *range(71, 76),
+        *range(81, 86),
+    }
+)
+
 # Layout of a dental card: patient details sit in column C (index 2) of rows
 # 3-11, and the visit table starts at row 15.
 PATIENT_COLUMN = 2
@@ -95,11 +114,20 @@ def parse_gender(value) -> Gender | None:
 
 
 def extract_tooth_number(diagnosis_text: str) -> int | None:
-    """Extract tooth number from diagnosis text using regex."""
+    """Extract an FDI tooth number from diagnosis text, or None.
+
+    Anything outside `FDI_TEETH` is discarded rather than stored: the digits
+    after "d." are not necessarily a tooth. The diagnosis text itself is kept
+    verbatim in `diagnosis_notes` either way, so nothing is lost by declining to
+    interpret it.
+    """
     if not diagnosis_text:
         return None
     match = TOOTH_REGEX.search(diagnosis_text)
-    return int(match.group(1)) if match else None
+    if not match:
+        return None
+    tooth = int(match.group(1))
+    return tooth if tooth in FDI_TEETH else None
 
 
 def parse_price(row: list, price_idx: int = 6, fallback_idx: int = 7) -> Decimal | None:
@@ -425,8 +453,10 @@ def _import_workbook(
     # frontend. One line per file says the same thing.
     rows_without_doctor = 0
     rows_with_guessed_doctor = 0
+    visit_rows_seen = 0
 
     for visit_row in _iter_visit_rows(rows):
+        visit_rows_seen += 1
         resolved = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
         if not resolved.id:
             rows_without_doctor += 1
@@ -469,6 +499,15 @@ def _import_workbook(
             counts["visits_incomplete"] += 1
         if resolved.guessed:
             rows_with_guessed_doctor += 1
+
+    # A card whose visit table is not where the parser expects it produces a
+    # patient and nothing else, and used to report clean success — the one
+    # failure mode the summary could not distinguish from an empty card. Counted
+    # on the iterator, not on `visits_created`, so a re-import of an already
+    # imported card stays silent: its rows are seen and then skipped as
+    # duplicates, which is a different thing from never finding any.
+    if visit_rows_seen == 0:
+        errors.append(f"{filename}: No visit rows found — check the file layout")
 
     if rows_without_doctor:
         errors.append(

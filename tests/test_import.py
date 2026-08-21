@@ -223,6 +223,42 @@ def test_a_file_with_too_few_rows_is_reported(client, admin_token, doctor):
     assert any("File too short" in e for e in summary["errors"])
 
 
+def test_a_card_with_no_visit_rows_is_reported(client, admin_token, doctor):
+    """The patient parses, the visit table does not — previously silent success."""
+    summary = _events(_post(client, admin_token, _dental_card([])))[-1]["summary"]
+
+    assert summary["patients_created"] == 1
+    assert summary["visits_created"] == 0
+    assert any("No visit rows found" in e for e in summary["errors"])
+
+
+def test_a_reimported_card_is_not_mistaken_for_an_empty_one(client, admin_token, doctor):
+    """Its rows are seen and skipped as duplicates, which is not 'none found'."""
+    card = _dental_card([VISIT_ROW])
+    _post(client, admin_token, card)
+    summary = _events(_post(client, admin_token, card))[-1]["summary"]
+
+    assert summary["visits_skipped"] == 1
+    assert not any("No visit rows found" in e for e in summary["errors"])
+
+
+def test_a_tooth_number_outside_fdi_notation_is_discarded(client, admin_token, doctor):
+    """'d. 2000' is a year or a price, not a tooth. The note text still lands."""
+    row = ["01.03.2024.", None, "Kontrola d. 2000", None, "Filling", "M", "4000"]
+    _post(client, admin_token, _dental_card([row]))
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["tooth_number"] is None
+    assert visits[0]["diagnosis_notes"] == "Kontrola d. 2000"
+
+
+def test_a_valid_fdi_tooth_number_is_kept(client, admin_token, doctor):
+    _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["tooth_number"] == 16
+
+
 def test_a_row_without_a_date_inherits_the_one_above(client, admin_token, doctor):
     """These cards are hand-written; a blank date means 'same day'."""
     rows = [
