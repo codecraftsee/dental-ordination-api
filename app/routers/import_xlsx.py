@@ -32,11 +32,18 @@ logger = logging.getLogger(__name__)
 # no log line, and no `text/event-stream` for the frontend's SSE reader to
 # parse, which makes it look like a silent hang rather than an error.
 #
-# This is a safety net, not the intended path: the frontend batches uploads (see
-# MAX_FILES_PER_REQUEST in the docstring below). It stays finite because every
-# file in a request is held in memory twice — once in Starlette's spooled form,
-# once in `file_data` below. Caddy's `request_body max_size 100MB` is the real
-# ceiling; this only stops a pathological file *count* from getting that far.
+# A backstop against a non-browser caller, NOT a supported request size. The
+# frontend sends 50 files per request (MAX_FILES_PER_REQUEST, see the endpoint
+# docstring), so the real client is two orders of magnitude below this and the
+# number exists only so a scripted caller meets an honest error instead of the
+# silent hang described above.
+#
+# Kept at 5000 rather than lowered to something nearer the real traffic, for two
+# reasons. Caddy's `request_body max_size 100MB` already bounds the memory a
+# request can cost regardless of how the files divide up, so this only guards
+# against a pathological *count* of tiny files — where 5000 is cheap. And
+# anything below Starlette's own 1000 would make `_RaisedFileLimitRoute` tighten
+# the default rather than raise it, which is the opposite of what it exists for.
 MAX_IMPORT_FILES = 5000
 
 # How long the slot below may go untouched before another request may take it.
@@ -726,14 +733,21 @@ async def import_xlsx_files(
     - file_done: emitted after each file completes (success or per-file error)
     - complete: emitted once after all files are processed, with the full summary
 
-    Callers should send **at most 200 files per request** and repeat the call
-    per batch (the frontend's MAX_FILES_PER_REQUEST). A request is all-or-nothing
-    at the transport level: every file is buffered in memory for the whole run,
-    and a dropped connection loses the progress stream for everything still
-    queued behind it. Batching bounds both, and re-sending a batch is safe —
-    patients are matched on name plus date of birth and visits on their content,
-    so an already-imported file lands as `visits_skipped`, not as duplicates.
-    `MAX_IMPORT_FILES` above is the hard backstop, not the recommended size.
+    Callers should send **at most 50 files per request** and repeat the call per
+    batch — the frontend's `MAX_FILES_PER_REQUEST`, which is 50 as of its
+    `import-run-control` change (it was 200 before). That number is no longer
+    only about what this endpoint can take: it also bounds how much work a user's
+    Cancel throws away, how much a Resume has to re-send, and how long the
+    progress bar sits still while a batch uploads, since `fetch` cannot report
+    upload progress and nothing streams back until the whole body has arrived.
+
+    Every file in a request is buffered in memory for the whole run, and a
+    dropped connection abandons everything still queued behind the file in
+    flight. Batching bounds both. Re-sending a batch is safe — patients are
+    matched on name plus date of birth and visits on their content, so an
+    already-imported file lands as `visits_skipped`, not as duplicates.
+    `MAX_IMPORT_FILES` above is a backstop against a non-browser caller, not a
+    supported request size.
     """
     override_doctor_id = _validate_override_doctor(doctor_id)
     if not override_doctor_id:
@@ -749,12 +763,12 @@ async def import_xlsx_files(
         # patient-import.service.ts) and records the batch's files as
         # permanently failed on any other 4xx. This condition is the most
         # transient one the endpoint has — "someone is mid-import, try shortly"
-        # — and it is reachable from the client's own Cancel/Resume: the slot is
-        # freed by the generator's `finally`, which does not run until the
-        # in-flight file finishes, so a quick Resume can land while the
-        # cancelled run is still unwinding. A 409 there would kill the resume
-        # outright. 409 also says "conflict with the resource's state", which
-        # this is not; nothing about the request is wrong.
+        # — and it stays reachable from the client's own Cancel/Resume even with
+        # the background release in place: the slot is not freed until the file
+        # in flight finishes, so a Resume sent inside that window still lands
+        # here. It just has to be a status the client will try again.
+        # 409 also says "conflict with the resource's state", which this is not;
+        # nothing about the request is wrong and the same bytes work moments on.
         raise HTTPException(
             status_code=429,
             detail="An import is already running. Wait for it to finish and try again.",
@@ -773,11 +787,16 @@ async def import_xlsx_files(
         _IMPORT_SLOT.release(slot_token)
         raise
 
+    # Visible to the background task below, which is the only place that runs on
+    # every ending this request can have — including the client hanging up.
+    run_state = {"files_done": 0, "reached_end": False}
+
     def generate():
         summary = {**_empty_counts(), "files_processed": 0, "errors": []}
 
         try:
             total = len(file_data)
+            logger.info("Import: starting, %d file(s)", total)
             doctors = _load_doctor_index()
 
             for i, (filename, content) in enumerate(file_data):
@@ -825,6 +844,7 @@ async def import_xlsx_files(
                         summary[key] += value
                 summary["errors"].extend(file_errors)
                 summary["files_processed"] += 1
+                run_state["files_done"] = summary["files_processed"]
 
                 yield _sse(
                     {
@@ -837,9 +857,14 @@ async def import_xlsx_files(
                     }
                 )
 
+            run_state["reached_end"] = True
             yield _sse({"type": "complete", "summary": summary})
 
         except Exception as e:
+            # Previously this vanished into the summary's errors and was never
+            # logged, so a run that died mid-way left the server silent.
+            logger.exception("Import: fatal error after %d file(s)", summary["files_processed"])
+            run_state["reached_end"] = True
             summary["errors"].append(f"Fatal error: {str(e)}")
             yield _sse({"type": "complete", "summary": summary})
 
@@ -852,6 +877,28 @@ async def import_xlsx_files(
             # deterministic; releasing twice is safe, since the token is stale
             # after the first one.
             _IMPORT_SLOT.release(slot_token)
+
+    def _finish_run() -> None:
+        """Release the slot and record how the run ended.
+
+        This is the only place that runs on *every* ending this request has:
+        completion, a fatal error, and the client hanging up. Catching
+        `GeneratorExit` around the loop would not do it — that exception is not
+        delivered promptly, which is the same reason the release lives here.
+
+        Before this, an abandoned import left no server-side trace at all. A
+        cancel and a network drop are indistinguishable from here, and during a
+        migration either is worth seeing, so both log at warning.
+        """
+        _IMPORT_SLOT.release(slot_token)
+        if run_state["reached_end"]:
+            logger.info("Import: finished, %d file(s)", run_state["files_done"])
+        else:
+            logger.warning(
+                "Import: client disconnected after %d of %d file(s); the rest never started",
+                run_state["files_done"],
+                len(file_data),
+            )
 
     return StreamingResponse(
         generate(),
@@ -867,5 +914,5 @@ async def import_xlsx_files(
         # batch 3 times over ~3s (MAX_BATCH_ATTEMPTS/RETRY_BASE_MS), against a
         # slot that stayed held for ~80s, so every attempt got a 429 and the
         # resumed run was recorded as failed.
-        background=BackgroundTask(_IMPORT_SLOT.release, slot_token),
+        background=BackgroundTask(_finish_run),
     )

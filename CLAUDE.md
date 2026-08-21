@@ -153,13 +153,29 @@ resource. The `doctors` table was merged into `users` and dropped.
     arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
     this router ran — no log line, and no `text/event-stream` for the frontend's
     SSE reader. `_RaisedFileLimitRoute` pre-parses the body to raise that limit.
-  - The frontend sends **200 files per request** and repeats per batch
+  - The frontend sends **50 files per request** and repeats per batch
     (`MAX_FILES_PER_REQUEST` in the `dental-ordination` repo's
-    `patient.service.ts`). 5000 is a backstop against absurd requests, not the
-    intended size: every file in a request is held in memory for the whole run.
+    `import-batch.ts`) — it was 200 before that repo's `import-run-control`
+    change. The number is no longer only about what this endpoint can take: it
+    also bounds how much work a Cancel throws away, how much a Resume re-sends,
+    and how long the progress bar sits still during upload, since `fetch` cannot
+    report upload progress. An 8,000-file migration is therefore ~160 requests.
+    `MAX_IMPORT_FILES` stays at 5000 as a backstop against a non-browser caller,
+    not as a supported size — Caddy's 100MB body limit already bounds the memory
+    a request can cost, and anything under Starlette's own 1000 would make
+    `_RaisedFileLimitRoute` tighten the default instead of raising it.
     Re-sending a batch is safe — patients match on name plus date of birth and
     visits on their content, so an already-imported file counts as
     `visits_skipped`, not a duplicate.
+  - **A cancelled run stops at the file in flight.** Verified against a live
+    uvicorn with a client that hard-closes the socket: the file being parsed
+    when the connection drops commits, and every file queued behind it is never
+    started. The client therefore sees one fewer `file_done` than the number of
+    files that actually committed — harmless, since re-sending the in-flight
+    file comes back as `visits_skipped`, but the frontend's resume manifest is
+    off by one at the abort point. Runs log their ending: `info` on completion,
+    `warning` naming how far it got on a disconnect. Before that, an abandoned
+    import left no server-side trace at all.
   - **One import at a time.** A request arriving while another is in progress is
     refused with a **`429`**, not queued — waiting would mean a second request
     sitting on its whole body in memory, which is the thing being rationed. The

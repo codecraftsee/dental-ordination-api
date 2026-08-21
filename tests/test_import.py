@@ -534,13 +534,17 @@ def test_the_response_carries_a_background_slot_release(client, admin_token, doc
 
     upload = UploadFile(file=BytesIO(_dental_card([VISIT_ROW])), filename="bg.xlsx")
     resp = asyncio.run(import_xlsx_files(files=[upload], doctor_id=None, _=None))
-    try:
-        assert resp.background is not None, "no BackgroundTask: a cancel would strand the slot"
-        assert resp.background.func == _IMPORT_SLOT.release
-    finally:
-        # The call above claimed the slot and the generator is never iterated,
-        # so nothing else would ever give it back.
-        resp.background.func(*resp.background.args)
+
+    assert resp.background is not None, "no BackgroundTask: a cancel would strand the slot"
+
+    # The call claimed the slot, and the generator is never iterated here, so
+    # the background task is the only thing that can hand it back.
+    assert _IMPORT_SLOT.acquire() is None
+    resp.background.func(*resp.background.args)
+
+    token = _IMPORT_SLOT.acquire()
+    assert token is not None, "the background task did not release the slot"
+    _IMPORT_SLOT.release(token)
 
 
 def test_the_slot_is_free_again_after_an_import_finishes(client, admin_token, doctor):
