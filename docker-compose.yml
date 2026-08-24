@@ -12,8 +12,12 @@ services:
     build: .
     # Tagged with the commit it was built from, so previous builds stay on disk
     # and a rollback is `IMAGE_TAG=<sha> docker compose up -d --no-build` rather
-    # than a git reset plus a full rebuild. deploy-api.sh exports this; the
-    # `preprod` fallback keeps a bare `docker compose up` working by hand.
+    # than a git reset plus a full rebuild. deploy-api.sh exports this.
+    # The `preprod` fallback keeps a bare `docker compose up` from failing
+    # outright, but it is not a safe default: it starts whatever was last built
+    # untagged, so a hand-run restart without IMAGE_TAG silently serves stale
+    # code while looking healthy. Always pass the tag — see deploy/README.md,
+    # "Restarting by hand".
     image: dental-api:${IMAGE_TAG:-preprod}
     restart: unless-stopped
     # Real env vars, injected at runtime. pydantic-settings gives these priority
