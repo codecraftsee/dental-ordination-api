@@ -407,6 +407,12 @@ Secrets (`DENTAL_SSH_KEY`, `DENTAL_KNOWN_HOSTS`, `DENTAL_SERVER`) live on the
 environment — and therefore passes through the approval gate — can read them.
 
 ## Pre-production (Hetzner)
+- `https://preprod.api.smiletimeclinic.rs` (API) and
+  `https://preprod.admin.smiletimeclinic.rs` (admin app), both A records on a
+  Loopia-registered domain. The `preprod.` prefix leaves the bare `api.` /
+  `admin.` names free for production. Hostnames come from `/opt/dental/.env`;
+  the Angular bundle bakes its copy in at build time, so changing one is a
+  server edit *and* a frontend redeploy — see [`deploy/README.md`](deploy/README.md)
 - Deploys from the **`preprod`** branch, never `develop`
 - Docker Compose: FastAPI behind Caddy with automatic HTTPS — see [`deploy/README.md`](deploy/README.md)
 - Server config lives at `/opt/dental/.env` only; the local `.env` is never used by a deploy
@@ -451,8 +457,11 @@ of going live; do not add one as a side effect of something else.
 
 Wiring it up needs, none of which is code: the second Hetzner box bootstrapped
 (the user owns a two-server package and server 2 is reserved for this), a
-separate Supabase project, a freshly generated `SECRET_KEY`, the real domain for
+separate Supabase project, a freshly generated `SECRET_KEY`, prod hostnames for
 `API_HOST`/`ADMIN_HOST`/`ALLOWED_ORIGINS`/`FRONTEND_URL`, and a verified Resend
+domain. The domain itself is no longer a blocker: `smiletimeclinic.rs` is
+registered at Loopia and pre-prod sits under `preprod.api.` / `preprod.admin.`
+precisely so production can take the bare `api.` / `admin.` names on the same
 domain. One code gap too: `deploy-api.sh` resolves `origin/$BRANCH`, so it
 cannot check out a tag yet — see the comment in `deploy-prod.yml`.
 

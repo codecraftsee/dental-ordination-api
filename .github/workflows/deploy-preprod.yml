@@ -30,8 +30,10 @@ jobs:
     environment:
       name: preprod
       # Hardcoded rather than read from a secret because GitHub does not expand
-      # the secrets context here. Change it when the real domain replaces sslip.io.
-      url: https://api.62-238-37-26.sslip.io
+      # the secrets context here. Keep it in step with API_HOST in
+      # /opt/dental/.env — it is only the Deployments-tab link, so a stale value
+      # misleads rather than breaks.
+      url: https://preprod.api.smiletimeclinic.rs
 
     steps:
       - uses: actions/checkout@v4

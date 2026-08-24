@@ -99,20 +99,36 @@ Caddy issues a local self-signed cert for `localhost` (hence `-k`); public
 hostnames get real Let's Encrypt certs. Tear down with
 `ENV_FILE=.env.docker docker compose --env-file .env.docker down`.
 
-## Switching to a real domain
+## Hostnames
 
-Two lines in `/opt/dental/.env`:
+Pre-prod is served from `smiletimeclinic.rs`, registered at Loopia:
 
-```diff
--API_HOST=api.5-161-42-7.sslip.io
-+API_HOST=api.ourdomain.rs
--ADMIN_HOST=admin.5-161-42-7.sslip.io
-+ADMIN_HOST=admin.ourdomain.rs
-```
+| | |
+|---|---|
+| API | `https://preprod.api.smiletimeclinic.rs` |
+| Admin | `https://preprod.admin.smiletimeclinic.rs` |
 
-Also update `ALLOWED_ORIGINS` and `FRONTEND_URL` to the new admin host, point
-two A records at the server, then `docker compose --env-file /opt/dental/.env up -d`.
-Caddy requests the new certificates on startup.
+Both are A records pointing at the pre-prod server. The `preprod.` prefix is
+there so production can take `api.` and `admin.` on the same domain later
+without a second registration.
+
+Changing a hostname is four lines in `/opt/dental/.env` — `API_HOST`,
+`ADMIN_HOST`, `ALLOWED_ORIGINS` and `FRONTEND_URL` — followed by
+`docker compose --env-file /opt/dental/.env up -d`. Caddy requests the new
+certificates on startup, so **point DNS at the server first**: the HTTP-01
+challenge resolves the hostname itself, and restarting ahead of DNS spends
+Let's Encrypt attempts on a guaranteed failure.
+
+Two things do not live in this file and have to move with it: the Angular
+bundle bakes the API hostname in at build time (`environment.preprod.ts` in the
+`dental-ordination` repo, then a redeploy), and `deploy-preprod.yml`'s
+`environment.url` is a hardcoded link. Until the frontend is rebuilt the admin
+app calls a hostname Caddy no longer serves, so cut over and redeploy the
+frontend in one sitting.
+
+A box with no DNS at all can still run the stack: use sslip.io, which resolves
+the IPv4 encoded in the hostname (`5.161.42.7` -> `api.5-161-42-7.sslip.io`).
+That is how pre-prod ran before the domain arrived.
 
 ## Troubleshooting
 
