@@ -113,9 +113,10 @@ there so production can take `api.` and `admin.` on the same domain later
 without a second registration.
 
 Changing a hostname is four lines in `/opt/dental/.env` — `API_HOST`,
-`ADMIN_HOST`, `ALLOWED_ORIGINS` and `FRONTEND_URL` — followed by
-`docker compose --env-file /opt/dental/.env up -d`. Caddy requests the new
-certificates on startup, so **point DNS at the server first**: the HTTP-01
+`ADMIN_HOST`, `ALLOWED_ORIGINS` and `FRONTEND_URL` — followed by a restart, for
+which see [Restarting by hand](#restarting-by-hand): the bare `up -d` you would
+reach for first is the one command that quietly breaks this. Caddy requests the
+new certificates on startup, so **point DNS at the server first**: the HTTP-01
 challenge resolves the hostname itself, and restarting ahead of DNS spends
 Let's Encrypt attempts on a guaranteed failure.
 
@@ -130,6 +131,40 @@ A box with no DNS at all can still run the stack: use sslip.io, which resolves
 the IPv4 encoded in the hostname (`5.161.42.7` -> `api.5-161-42-7.sslip.io`).
 That is how pre-prod ran before the domain arrived.
 
+## Restarting by hand
+
+Picking up an `/opt/dental/.env` change means recreating the containers, and the
+command has to carry the image tag:
+
+```bash
+cd /opt/dental/app
+IMAGE_TAG=$(git rev-parse --short HEAD) \
+  docker compose --env-file /opt/dental/.env up -d --no-build
+```
+
+**`docker compose --env-file /opt/dental/.env up -d`, with no `IMAGE_TAG`, rolls
+the API back.** The service is `dental-api:${IMAGE_TAG:-preprod}`, and
+`deploy-api.sh` exports the tag of the commit it built. A restart run by hand
+exports nothing, so compose resolves the fallback and starts `dental-api:preprod`
+— the image left behind by the last untagged build, which can be weeks old.
+
+Nothing about it looks wrong. The container starts, the healthcheck passes, Caddy
+proxies to it, and the `.env` change you came for is applied correctly; the only
+symptom is that the code serving it is stale. It happened on 2026-08-24 during
+the Resend cutover and cost a two-week rollback that was spotted only because
+`/health` had gained its `version` field in between.
+
+Check which image is actually running whenever a restart is followed by something
+inexplicable:
+
+```bash
+docker inspect app-api-1 --format '{{.Config.Image}}'   # dental-api:<short-sha>
+git -C /opt/dental/app rev-parse --short HEAD           # must be the same sha
+```
+
+`dental-api:preprod` as the answer to the first means you are on the fallback.
+Re-run the tagged command above to get back.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -139,3 +174,4 @@ That is how pre-prod ran before the domain arrived.
 | Frontend requests blocked by CORS | `ALLOWED_ORIGINS` must exactly match the admin origin, scheme included |
 | Import progress bar jumps 0% → 100% | `flush_interval -1` missing from the Caddyfile proxy block |
 | Container restarting | `docker compose --env-file /opt/dental/.env logs --tail=100 api` |
+| API healthy but serving old code | `docker inspect app-api-1 --format '{{.Config.Image}}'` — see [Restarting by hand](#restarting-by-hand) |
