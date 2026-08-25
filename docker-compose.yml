@@ -29,6 +29,29 @@ services:
     # bypassing TLS. Only Caddy, on the shared network, can reach it.
     expose:
       - "8000"
+    # Container stdout goes to the systemd journal rather than Docker's default
+    # per-container json-file. Every deploy runs `up -d --build`, which recreates
+    # the container, and a json-file log is deleted along with the container it
+    # belonged to — so log history never reached back past the last deploy. The
+    # journal lives outside Docker and survives recreation; journald's
+    # SystemMaxUse (set to 1G on the server) is what bounds the disk it can take.
+    #
+    # Read it back with the container name, which Compose derives from the
+    # project directory and so is stable across deploys — that stability is the
+    # point, it is what lets one query span builds:
+    #   journalctl CONTAINER_NAME=app-api-1 -f
+    #   journalctl CONTAINER_NAME=app-api-1 --since "1 hour ago"
+    # Requires membership of the `systemd-journal` group; without it the daemon's
+    # messages are invisible and the query returns nothing rather than an error.
+    #
+    # Env-driven because Docker Desktop's Linux VM has no systemd, so `journald`
+    # cannot work on a Mac: the server sets LOG_DRIVER=journald in
+    # /opt/dental/.env and the local smoke test falls through to json-file.
+    # Deliberately no `options:` — the two drivers accept different option names
+    # (`max-size` is json-file only, `tag` is not), so anything set here would
+    # break whichever driver it was not written for.
+    logging:
+      driver: ${LOG_DRIVER:-json-file}
     networks:
       - dental
 
@@ -50,6 +73,10 @@ services:
       # Losing these means re-requesting certs and burning Let's Encrypt quota.
       - caddy_data:/data
       - caddy_config:/config
+    # Same reasoning as the api service above.
+    #   journalctl CONTAINER_NAME=app-caddy-1 -f
+    logging:
+      driver: ${LOG_DRIVER:-json-file}
     depends_on:
       - api
     networks:
