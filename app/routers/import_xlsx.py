@@ -278,6 +278,47 @@ def _empty_counts() -> dict:
     }
 
 
+def _format_counts(counts: dict) -> str:
+    """The counters as one human-readable clause, shared by the per-file and run lines."""
+    return (
+        f"patients +{counts['patients_created']} "
+        f"({counts['patients_found']} matched, {counts['patients_updated']} filled), "
+        f"visits +{counts['visits_created']} ({counts['visits_skipped']} skipped)"
+    )
+
+
+def _log_file_result(filename: str, committed: bool, counts: dict, errors: list[str]) -> None:
+    """Write one durable line per file.
+
+    These numbers are already computed for the `file_done` SSE event, but that
+    event only ever reaches the browser tab that started the run and is gone
+    when it closes. Nothing on the server recorded which file failed, or which
+    one produced records that need review, so a migration could only be audited
+    while somebody was watching it happen.
+
+    Levels are chosen so `journalctl -p warning` is the review queue: anything
+    needing a human — a failed file, a flagged record, a card that parsed but
+    complained — is a warning, and a clean file is info.
+    """
+    if not committed:
+        logger.warning("Import: %s FAILED — %s", filename, "; ".join(errors) or "unknown error")
+        return
+
+    incomplete = counts["patients_incomplete"] + counts["visits_incomplete"]
+    if not incomplete and not errors:
+        logger.info("Import: %s — %s", filename, _format_counts(counts))
+        return
+
+    # Only the clauses that apply, so the line says what is actually wrong
+    # rather than trailing a "0 flagged incomplete" behind a parse complaint.
+    detail = _format_counts(counts)
+    if incomplete:
+        detail += f", {incomplete} flagged incomplete"
+    if errors:
+        detail += f"; {'; '.join(errors)}"
+    logger.warning("Import: %s — %s", filename, detail)
+
+
 class DoctorIndex(NamedTuple):
     ids: list[str]
     by_initial: dict[str, str]
@@ -853,6 +894,8 @@ async def import_xlsx_files(
                 summary["files_processed"] += 1
                 run_state["files_done"] = summary["files_processed"]
 
+                _log_file_result(filename, committed, file_counts, file_errors)
+
                 yield _sse(
                     {
                         "type": "file_done",
@@ -865,6 +908,16 @@ async def import_xlsx_files(
                 )
 
             run_state["reached_end"] = True
+            # The rollup the `complete` event carries, written down as well. A
+            # run's outcome is otherwise only reconstructable by re-reading
+            # every per-file line above.
+            logger.info(
+                "Import: run totals over %d file(s) — %s, %d flagged incomplete, %d error(s)",
+                summary["files_processed"],
+                _format_counts(summary),
+                summary["patients_incomplete"] + summary["visits_incomplete"],
+                len(summary["errors"]),
+            )
             yield _sse({"type": "complete", "summary": summary})
 
         except Exception as e:
