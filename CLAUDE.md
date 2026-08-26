@@ -243,6 +243,33 @@ resource. The `doctors` table was merged into `users` and dropped.
   - Duplicate visit rows *within a single card* are still imported twice. The
     session sets `autoflush=False`, so the duplicate check only ever saw rows
     already committed. Longstanding behaviour, left alone deliberately.
+  - **What a run writes to the journal.** Every line of one request is prefixed
+    `Import[<token>]`, the token being per *request* — the server never learns
+    that the frontend's ~160 batches belong to one migration, so a true run id
+    would have to come from the Angular app. Levels make `journalctl -p warning`
+    the review queue: a clean file is `info`, and anything wanting a human is a
+    `warning`. Three traps, each of which looks like tidying:
+    - **A card's filename is a patient's name**, and since the journald switch
+      these lines outlive deploys by months — outside the database, outside its
+      roles, and untouched by deleting that patient through the API. So the name
+      is written *only* for a file that **failed**: its transaction rolled back,
+      leaving this line as the sole evidence the file was read, and a position
+      cannot identify it afterwards. A flagged file logs `file N/M` instead,
+      because its records are in the database wearing `import_incomplete` and can
+      be listed from there. Error strings are prefix-stripped for the same
+      reason — every one is built as `f"{filename}: ..."`, so printing them raw
+      would put the name straight back on a line that just omitted it.
+    - **The doctor-index line's level tracks whether attribution can work.** An
+      index with no usable initials means every visit naming a doctor gets an
+      arbitrary one, so it warns and names the colliding doctors. It was `info`,
+      which put the one line explaining a whole bad run underneath the ~8000
+      per-file lines it caused. It stays silent when `doctor_id` was passed,
+      since `_resolve_doctor` never consults the index then.
+    - **Log-only facts travel on `FileLogDetail`, never in `counts`.** The counts
+      dict is spread into the `file_done` SSE event verbatim, so a counter added
+      there joins the contract the Angular app parses. `errors` is not a way
+      round it either: the frontend concatenates those across every batch and
+      shows them to whoever is importing.
 
 ## Planned — not implemented
 Documented here so nobody assumes these already work.
