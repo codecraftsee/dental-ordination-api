@@ -287,7 +287,46 @@ def _format_counts(counts: dict) -> str:
     )
 
 
-def _log_file_result(filename: str, committed: bool, counts: dict, errors: list[str]) -> None:
+class FileLogDetail(NamedTuple):
+    """Per-file facts that belong in the journal but not in the SSE payload.
+
+    `counts` is spread into the `file_done` event verbatim (`**file_counts`), so
+    a counter added there joins the contract the Angular app parses and the
+    characterization tests pin. A missing price is worth explaining in a log
+    line and is not worth a frontend change, so it travels here instead.
+    """
+
+    visits_missing_price: int = 0
+
+
+def _format_flagged(patients: int, visits: int, missing_price: int = 0) -> str:
+    """Which records were flagged, split by kind.
+
+    Summed, the number cannot distinguish one flagged patient from twelve
+    flagged visits, which are different problems with different remedies.
+    """
+    parts = []
+    if patients:
+        parts.append(f"{patients} patient(s)")
+    if visits:
+        visits_part = f"{visits} visit(s)"
+        # Every other cause of a flag appends an error string that the caller
+        # prints alongside this clause. A missing price is the only one that
+        # does not, so without naming it here a price-flagged file reports a
+        # count and no reason at all.
+        if missing_price:
+            visits_part += f", {missing_price} of them for a missing price"
+        parts.append(visits_part)
+    return ", ".join(parts)
+
+
+def _log_file_result(
+    filename: str,
+    committed: bool,
+    counts: dict,
+    errors: list[str],
+    log_detail: FileLogDetail,
+) -> None:
     """Write one durable line per file.
 
     These numbers are already computed for the `file_done` SSE event, but that
@@ -304,16 +343,20 @@ def _log_file_result(filename: str, committed: bool, counts: dict, errors: list[
         logger.warning("Import: %s FAILED — %s", filename, "; ".join(errors) or "unknown error")
         return
 
-    incomplete = counts["patients_incomplete"] + counts["visits_incomplete"]
-    if not incomplete and not errors:
+    flagged = _format_flagged(
+        counts["patients_incomplete"],
+        counts["visits_incomplete"],
+        log_detail.visits_missing_price,
+    )
+    if not flagged and not errors:
         logger.info("Import: %s — %s", filename, _format_counts(counts))
         return
 
     # Only the clauses that apply, so the line says what is actually wrong
     # rather than trailing a "0 flagged incomplete" behind a parse complaint.
     detail = _format_counts(counts)
-    if incomplete:
-        detail += f", {incomplete} flagged incomplete"
+    if flagged:
+        detail += f", flagged incomplete: {flagged}"
     if errors:
         detail += f"; {'; '.join(errors)}"
     logger.warning("Import: %s — %s", filename, detail)
@@ -626,11 +669,14 @@ def _import_workbook(
     override_doctor_id: str | None,
     counts: dict,
     errors: list[str],
-) -> None:
+) -> FileLogDetail:
     """Import one card into `db`, updating `counts` and `errors` in place.
 
     Does not commit — the caller owns the transaction so that a file either
     lands whole or not at all.
+
+    Returns the log-only detail described on `FileLogDetail`; the counts the
+    caller reports to the browser keep travelling in `counts`.
     """
     wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
     try:
@@ -640,11 +686,11 @@ def _import_workbook(
 
     if len(rows) < MIN_ROWS:
         errors.append(f"{filename}: File too short, expected at least {MIN_ROWS} rows")
-        return
+        return FileLogDetail()
 
     header = _parse_patient_header(rows, filename, errors)
     if header is None:
-        return
+        return FileLogDetail()
 
     patient = (
         db.query(Patient)
@@ -696,6 +742,7 @@ def _import_workbook(
     # file says the same thing.
     rows_without_doctor = 0
     rows_with_guessed_doctor = 0
+    visits_missing_price = 0
     visit_rows_seen = 0
 
     for visit_row in _iter_visit_rows(rows):
@@ -740,6 +787,8 @@ def _import_workbook(
         counts["visits_created"] += 1
         if incomplete:
             counts["visits_incomplete"] += 1
+        if visit_row.price is None:
+            visits_missing_price += 1
         if resolved.guessed:
             rows_with_guessed_doctor += 1
 
@@ -761,6 +810,8 @@ def _import_workbook(
             f"{filename}: Could not identify the doctor for {rows_with_guessed_doctor} "
             "visit row(s); assigned an arbitrary one and flagged them for review"
         )
+
+    return FileLogDetail(visits_missing_price=visits_missing_price)
 
 
 def _validate_override_doctor(doctor_id: str | None) -> str | None:
@@ -950,8 +1001,9 @@ async def import_xlsx_files(
                 # One session and one transaction per file, so a bad file
                 # cannot roll back the ones already imported.
                 db = SessionLocal()
+                log_detail = FileLogDetail()
                 try:
-                    _import_workbook(
+                    log_detail = _import_workbook(
                         db,
                         filename,
                         content,
@@ -966,6 +1018,7 @@ async def import_xlsx_files(
                     db.rollback()
                     file_errors.append(f"{filename}: {str(e)}")
                     file_counts = _empty_counts()  # nothing was persisted
+                    log_detail = FileLogDetail()  # nor is there anything to explain
                 finally:
                     db.close()
 
@@ -976,7 +1029,7 @@ async def import_xlsx_files(
                 summary["files_processed"] += 1
                 run_state["files_done"] = summary["files_processed"]
 
-                _log_file_result(filename, committed, file_counts, file_errors)
+                _log_file_result(filename, committed, file_counts, file_errors, log_detail)
 
                 yield _sse(
                     {
@@ -994,10 +1047,11 @@ async def import_xlsx_files(
             # run's outcome is otherwise only reconstructable by re-reading
             # every per-file line above.
             logger.info(
-                "Import: run totals over %d file(s) — %s, %d flagged incomplete, %d error(s)",
+                "Import: run totals over %d file(s) — %s, flagged incomplete: %s, %d error(s)",
                 summary["files_processed"],
                 _format_counts(summary),
-                summary["patients_incomplete"] + summary["visits_incomplete"],
+                _format_flagged(summary["patients_incomplete"], summary["visits_incomplete"])
+                or "none",
                 len(summary["errors"]),
             )
             yield _sse({"type": "complete", "summary": summary})

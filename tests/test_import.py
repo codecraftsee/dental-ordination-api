@@ -735,3 +735,86 @@ def test_the_index_line_is_written_once_per_run_not_once_per_file(
     messages = [r.getMessage() for r in caplog.records]
     assert sum("doctor index" in m for m in messages) == 1
     assert sum("Could not identify the doctor" in m for m in messages) == 2
+
+
+# --- What the per-file line says a flag was for ----------------------------
+#
+# Every other cause of an `import_incomplete` flag appends an error string that
+# the per-file line prints. A missing price is the only one that does not, so it
+# is named explicitly; and patients and visits are reported apart, because one
+# flagged patient and twelve flagged visits are different problems.
+
+
+def _file_lines(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("Import: card.xlsx")
+    ]
+
+
+def test_a_price_flag_is_named_in_the_log(client, admin_token, doctor, caplog):
+    """Otherwise the line reports a count with no reason anywhere on it."""
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row]))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 visit(s), 1 of them for a missing price" in line
+
+
+def test_flagged_patients_and_visits_are_reported_apart(client, admin_token, doctor, caplog):
+    """A bad gender flags the patient; a missing price flags the visit."""
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row], gender="?"))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 patient(s), 1 visit(s)" in line
+    # The patient's own reason already travels as an error string.
+    assert "Invalid gender" in line
+
+
+def test_a_visit_flagged_only_for_its_doctor_does_not_claim_a_price_problem(
+    client, admin_token, make_user, caplog
+):
+    """The price clause appears only when a price is actually missing."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 visit(s)" in line
+    assert "missing price" not in line
+    assert "Could not identify the doctor" in line
+
+
+def test_a_clean_file_still_logs_at_info_with_no_flag_clause(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = [r for r in caplog.records if r.getMessage().startswith("Import: card.xlsx")]
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "flagged" not in records[0].getMessage()
+
+
+def test_the_run_rollup_splits_flagged_records_by_kind(client, admin_token, doctor, caplog):
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row], gender="?"))
+
+    rollup = [m for m in (r.getMessage() for r in caplog.records) if "run totals" in m][0]
+    assert "flagged incomplete: 1 patient(s), 1 visit(s)" in rollup
+
+
+def test_the_run_rollup_says_none_when_nothing_was_flagged(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    rollup = [m for m in (r.getMessage() for r in caplog.records) if "run totals" in m][0]
+    assert "flagged incomplete: none" in rollup
