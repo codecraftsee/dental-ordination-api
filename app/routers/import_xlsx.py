@@ -322,35 +322,114 @@ def _log_file_result(filename: str, committed: bool, counts: dict, errors: list[
 class DoctorIndex(NamedTuple):
     ids: list[str]
     by_initial: dict[str, str]
+    # Why an initial is *not* in `by_initial`, kept rather than discarded. These
+    # are the only explanation for a run that flags every visit it imports, and
+    # reconstructing them afterwards means querying the user table by hand — so
+    # `_log_doctor_index_health` writes them down while the run still has them.
+    #
+    # Required rather than defaulted: a NamedTuple's defaults are one shared
+    # object per field, so an empty default here would be the same dict handed
+    # to every index that omitted it.
+    ambiguous: dict[str, list[str]]
+    no_initial: list[str]
+
+
+def _doctor_label(doc: User) -> str:
+    """A doctor as a log line should name them; the id only if they have no name."""
+    return f"{doc.first_name or ''} {doc.last_name or ''}".strip() or doc.id
 
 
 def _load_doctor_index() -> DoctorIndex:
     """Map each *unambiguous* first-name initial to a doctor id.
 
-    An initial shared by two doctors is dropped rather than guessed at.
+    An initial shared by two doctors is dropped rather than guessed at, and a
+    doctor with no first name contributes no initial at all. Both cases leave a
+    doctor who is still eligible for attribution — they stay in `ids`, which is
+    what `_resolve_doctor` falls back to — but who can never be *matched*, so
+    they are recorded for the health line rather than dropped on the floor.
     """
     db = SessionLocal()
     try:
         doctors = db.query(User).filter(User.role == UserRole.DOCTOR).all()
-        by_initial: dict[str, str] = {}
-        ambiguous: set[str] = set()
+
+        # Grouping first, then deciding, says the rule in one place: an initial
+        # belongs to exactly one doctor or to nobody.
+        grouped: dict[str, list[User]] = {}
+        no_initial: list[str] = []
         for doc in doctors:
             initial = (doc.first_name or "")[:1].upper()
-            if not initial or initial in ambiguous:
+            if not initial:
+                no_initial.append(_doctor_label(doc))
                 continue
-            if initial in by_initial:
-                del by_initial[initial]
-                ambiguous.add(initial)
-            else:
-                by_initial[initial] = doc.id
-        logger.info(
-            "Import: found %d doctors, %d unique initials",
-            len(doctors),
-            len(by_initial),
-        )
-        return DoctorIndex([doc.id for doc in doctors], by_initial)
+            grouped.setdefault(initial, []).append(doc)
+
+        by_initial = {i: docs[0].id for i, docs in grouped.items() if len(docs) == 1}
+        ambiguous = {
+            i: [_doctor_label(d) for d in docs] for i, docs in grouped.items() if len(docs) > 1
+        }
+        return DoctorIndex([doc.id for doc in doctors], by_initial, ambiguous, no_initial)
     finally:
         db.close()
+
+
+def _log_doctor_index_health(doctors: DoctorIndex, override_doctor_id: str | None) -> None:
+    """Say once per run whether attribution can work, at a level that shows.
+
+    `_import_workbook` already reports a card whose doctor could not be
+    identified, so a run against a collided index writes that symptom once per
+    *file* — around 8000 times during the migration this was written for, one
+    per card, every line saying the same thing. The cause is this single line,
+    and it used to be `info`: the quietest thing in the journal, sitting
+    underneath its own consequences, while the only actionable fact in the run
+    was which initials collapsed and who collapsed them.
+
+    So the level follows the index's health rather than being fixed. A run that
+    cannot identify anybody is precisely the case somebody has to see, and it
+    names the collisions, because the fix is never in this code — two doctors
+    really do share an initial and the card really does carry only one letter.
+    That is a roster decision or a `doctor_id`, and neither is reachable from
+    here.
+
+    Silent on an override run: `_resolve_doctor` returns the caller's id without
+    ever consulting the index, so its health has no bearing on the outcome and a
+    warning about it would be noise.
+    """
+    if override_doctor_id:
+        return
+
+    counts = f"{len(doctors.ids)} doctor(s), {len(doctors.by_initial)} usable initial(s)"
+    problems = []
+    if doctors.ambiguous:
+        shared = ", ".join(
+            f"{initial} ({', '.join(names)})"
+            for initial, names in sorted(doctors.ambiguous.items())
+        )
+        problems.append(f"shared: {shared}")
+    if doctors.no_initial:
+        problems.append(f"no first name: {', '.join(doctors.no_initial)}")
+
+    if not problems:
+        logger.info("Import: doctor index ready — %s", counts)
+        return
+
+    # Nothing left to match on: every row naming an initial is guessed, so the
+    # whole run gets flagged. Distinguished from the partial case because the
+    # remedy differs — this one cannot import anything trustworthy at all.
+    if not doctors.by_initial:
+        logger.warning(
+            "Import: doctor index unusable — %s; %s. Every visit row naming a doctor gets an "
+            "arbitrary one and is flagged import_incomplete; pass doctor_id to attribute the "
+            "run explicitly.",
+            counts,
+            "; ".join(problems),
+        )
+    else:
+        logger.warning(
+            "Import: doctor index degraded — %s; %s. Visit rows naming those get an arbitrary "
+            "doctor and are flagged import_incomplete.",
+            counts,
+            "; ".join(problems),
+        )
 
 
 class ResolvedDoctor(NamedTuple):
@@ -738,6 +817,9 @@ def _doctor_index_for_run(override_doctor_id: str | None) -> DoctorIndex:
                 "or pass doctor_id, before importing."
             ),
         )
+    # After the rejection, so the one run that never starts does not also file a
+    # complaint about an index it was never going to use.
+    _log_doctor_index_health(doctors, override_doctor_id)
     return doctors
 
 
