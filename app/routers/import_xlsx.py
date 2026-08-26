@@ -396,19 +396,29 @@ def _log_file_result(
     logger.warning("Import[%s]: %s — %s", run_id, where, detail)
 
 
+class DoctorCandidate(NamedTuple):
+    id: str
+    first_name: str
+    last_name: str
+
+
 class DoctorIndex(NamedTuple):
+    # Active doctors only, in both roles this serves: who a card can be matched
+    # against, and who may receive a visit whose doctor is unidentified. A
+    # deactivated account is a departed or disabled user, and the clinic does
+    # not create accounts for doctors who have left, so nothing here needs them.
     ids: list[str]
-    by_initial: dict[str, str]
-    # Why an initial is *not* in `by_initial`, kept rather than discarded. These
-    # are the only explanation for a run that flags every visit it imports, and
-    # reconstructing them afterwards means querying the user table by hand — so
-    # `_log_doctor_index_health` writes them down while the run still has them.
+    candidates: list[DoctorCandidate]
+    # Doctors sharing a first initial, kept rather than discarded. A card that
+    # writes only that letter cannot be resolved to either of them, and this is
+    # the only explanation for a run that flags most of what it imports —
+    # reconstructing it afterwards means querying the user table by hand.
     #
     # Required rather than defaulted: a NamedTuple's defaults are one shared
     # object per field, so an empty default here would be the same dict handed
     # to every index that omitted it.
-    ambiguous: dict[str, list[str]]
-    no_initial: list[str]
+    ambiguous_initials: dict[str, list[str]]
+    unnamed: list[str]
 
 
 def _doctor_label(doc: User) -> str:
@@ -416,35 +426,90 @@ def _doctor_label(doc: User) -> str:
     return f"{doc.first_name or ''} {doc.last_name or ''}".strip() or doc.id
 
 
-def _load_doctor_index() -> DoctorIndex:
-    """Map each *unambiguous* first-name initial to a doctor id.
+# "Dr M", "dr. Milena" — an honorific the cards may or may not carry, which is
+# not part of anybody's name and must not be matched against one.
+_HONORIFIC = re.compile(r"^dr\.?\s*", re.IGNORECASE)
 
-    An initial shared by two doctors is dropped rather than guessed at, and a
-    doctor with no first name contributes no initial at all. Both cases leave a
-    doctor who is still eligible for attribution — they stay in `ids`, which is
-    what `_resolve_doctor` falls back to — but who can never be *matched*, so
-    they are recorded for the health line rather than dropped on the floor.
+
+def _normalize_doctor_label(raw: str | None) -> str | None:
+    """The card's doctor cell reduced to something comparable with a name.
+
+    The cell is filled in by hand across an archive spanning years, so it may
+    say `M`, `M.`, ` Mi `, `Dr M` or `Miodrag`. Only the first of those used to
+    match anything: the raw cell was looked up in a dict keyed by single
+    uppercase letters, so punctuation or an honorific meant no match and a
+    flagged visit, for a card that named its doctor perfectly clearly.
+    """
+    if not raw:
+        return None
+    text = _HONORIFIC.sub("", raw.strip())
+    text = text.strip(" .,;:-_/\\").strip()
+    return text.casefold() or None
+
+
+def _match_doctor(raw_label: str | None, candidates: list[DoctorCandidate]) -> str | None:
+    """The one doctor whose name the card's cell begins, or None.
+
+    One rule covers every form the cell takes, because an initial is just a
+    one-character prefix: `Miodrag` and `Mio` identify Miodrag Pavkovic, while
+    `Mi` and `M` fit both him and Milena and therefore identify nobody. Refusing
+    an ambiguous match is the point — `visits.doctor_id` is NOT NULL, so picking
+    one anyway would write a fabricated attribution that reads as fact.
+
+    First and last names both, since it is not yet established whether the cards
+    name doctors by one or the other. A doctor matching on both counts once.
+    """
+    key = _normalize_doctor_label(raw_label)
+    if not key:
+        return None
+    hits = {
+        c.id
+        for c in candidates
+        if (c.first_name or "").casefold().startswith(key)
+        or (c.last_name or "").casefold().startswith(key)
+    }
+    return hits.pop() if len(hits) == 1 else None
+
+
+def _load_doctor_index() -> DoctorIndex:
+    """Load the active doctors a run may match against and attribute to.
+
+    Inactive users are excluded from both. `is_active = False` is what
+    `DELETE /api/users/{id}` sets, and the clinic does not create accounts for
+    doctors who have left — so a deactivated account is a disabled or test one,
+    and neither should receive new clinical attribution.
     """
     db = SessionLocal()
     try:
-        doctors = db.query(User).filter(User.role == UserRole.DOCTOR).all()
+        doctors = (
+            db.query(User)
+            .filter(
+                User.role == UserRole.DOCTOR,
+                User.is_active == True,  # noqa: E712 — SQL comparison, not a Python bool test
+            )
+            .all()
+        )
 
-        # Grouping first, then deciding, says the rule in one place: an initial
-        # belongs to exactly one doctor or to nobody.
+        candidates = [
+            DoctorCandidate(doc.id, doc.first_name or "", doc.last_name or "")
+            for doc in doctors
+            if (doc.first_name or doc.last_name)
+        ]
+        unnamed = [_doctor_label(doc) for doc in doctors if not (doc.first_name or doc.last_name)]
+
+        # Reported, not used for matching: a shared initial only defeats a card
+        # that writes nothing but that letter, which `_match_doctor` discovers
+        # per row. Knowing it up front is what lets one line explain a run.
         grouped: dict[str, list[User]] = {}
-        no_initial: list[str] = []
         for doc in doctors:
             initial = (doc.first_name or "")[:1].upper()
-            if not initial:
-                no_initial.append(_doctor_label(doc))
-                continue
-            grouped.setdefault(initial, []).append(doc)
-
-        by_initial = {i: docs[0].id for i, docs in grouped.items() if len(docs) == 1}
-        ambiguous = {
+            if initial:
+                grouped.setdefault(initial, []).append(doc)
+        ambiguous_initials = {
             i: [_doctor_label(d) for d in docs] for i, docs in grouped.items() if len(docs) > 1
         }
-        return DoctorIndex([doc.id for doc in doctors], by_initial, ambiguous, no_initial)
+
+        return DoctorIndex([doc.id for doc in doctors], candidates, ambiguous_initials, unnamed)
     finally:
         db.close()
 
@@ -452,61 +517,58 @@ def _load_doctor_index() -> DoctorIndex:
 def _log_doctor_index_health(
     run_id: str, doctors: DoctorIndex, override_doctor_id: str | None
 ) -> None:
-    """Say once per run whether attribution can work, at a level that shows.
+    """Say once per run what attribution will and will not be able to resolve.
 
     `_import_workbook` already reports a card whose doctor could not be
-    identified, so a run against a collided index writes that symptom once per
-    *file* — around 8000 times during the migration this was written for, one
-    per card, every line saying the same thing. The cause is this single line,
-    and it used to be `info`: the quietest thing in the journal, sitting
-    underneath its own consequences, while the only actionable fact in the run
-    was which initials collapsed and who collapsed them.
+    identified, so a run against an unhelpful roster writes that symptom once
+    per *file* — around 8000 times during the migration this was written for,
+    every line saying the same thing. The cause is this single line, and it
+    used to be `info`: the quietest thing in the journal, sitting underneath its
+    own consequences.
 
-    So the level follows the index's health rather than being fixed. A run that
-    cannot identify anybody is precisely the case somebody has to see, and it
-    names the collisions, because the fix is never in this code — two doctors
-    really do share an initial and the card really does carry only one letter.
-    That is a roster decision or a `doctor_id`, and neither is reachable from
-    here.
+    What it reports is a *prediction*, not a verdict, because ambiguity now
+    depends on the cell. `_match_doctor` accepts any prefix of a name, so two
+    doctors sharing an initial only defeat a card that writes nothing but that
+    letter — `Mio` still resolves where `M` cannot. Naming them up front is what
+    lets one line explain a run's worth of flags.
 
     Silent on an override run: `_resolve_doctor` returns the caller's id without
-    ever consulting the index, so its health has no bearing on the outcome and a
-    warning about it would be noise.
+    consulting any of this, so its health has no bearing on the outcome.
     """
     if override_doctor_id:
         return
 
-    counts = f"{len(doctors.ids)} doctor(s), {len(doctors.by_initial)} usable initial(s)"
+    counts = f"{len(doctors.ids)} active doctor(s), {len(doctors.candidates)} matchable"
     problems = []
-    if doctors.ambiguous:
+    if doctors.ambiguous_initials:
         shared = ", ".join(
             f"{initial} ({', '.join(names)})"
-            for initial, names in sorted(doctors.ambiguous.items())
+            for initial, names in sorted(doctors.ambiguous_initials.items())
         )
-        problems.append(f"shared: {shared}")
-    if doctors.no_initial:
-        problems.append(f"no first name: {', '.join(doctors.no_initial)}")
+        problems.append(f"sharing an initial: {shared}")
+    if doctors.unnamed:
+        problems.append(f"no name to match on: {', '.join(doctors.unnamed)}")
 
     if not problems:
         logger.info("Import[%s]: doctor index ready — %s", run_id, counts)
         return
 
-    # Nothing left to match on: every row naming an initial is guessed, so the
-    # whole run gets flagged. Distinguished from the partial case because the
-    # remedy differs — this one cannot import anything trustworthy at all.
-    if not doctors.by_initial:
+    # Nothing carries a name, so no cell can match anything and every visit is
+    # attributed by fallback. Distinguished from the partial case because the
+    # remedy differs: this one cannot resolve a single row, however written.
+    if not doctors.candidates:
         logger.warning(
-            "Import[%s]: doctor index unusable — %s; %s. Every visit row naming a doctor gets "
-            "an arbitrary one and is flagged import_incomplete; pass doctor_id to attribute the "
-            "run explicitly.",
+            "Import[%s]: doctor index unusable — %s; %s. No card can be matched to anybody, so "
+            "every visit is attributed by fallback and flagged import_incomplete.",
             run_id,
             counts,
             "; ".join(problems),
         )
     else:
         logger.warning(
-            "Import[%s]: doctor index degraded — %s; %s. Visit rows naming those get an "
-            "arbitrary doctor and are flagged import_incomplete.",
+            "Import[%s]: doctor index degraded — %s; %s. A card naming only that letter cannot "
+            "be resolved to either of them and is flagged import_incomplete; a longer form such "
+            "as the full first name still resolves.",
             run_id,
             counts,
             "; ".join(problems),
@@ -524,10 +586,10 @@ class ResolvedDoctor(NamedTuple):
 
 def _resolve_doctor(
     override_doctor_id: str | None,
-    doctor_initial: str | None,
+    doctor_label: str | None,
     doctors: DoctorIndex,
 ) -> ResolvedDoctor:
-    """A caller-supplied doctor wins, then an initial match, then any doctor."""
+    """A caller-supplied doctor wins, then a name match, then the fallback."""
     if override_doctor_id:
         return ResolvedDoctor(override_doctor_id, guessed=False)
 
@@ -538,17 +600,17 @@ def _resolve_doctor(
     if not doctors.ids:
         return ResolvedDoctor(None, guessed=False)
 
-    if doctor_initial:
-        matched = doctors.by_initial.get(doctor_initial.upper())
+    if doctor_label:
+        matched = _match_doctor(doctor_label, doctors.candidates)
         if matched:
             return ResolvedDoctor(matched, guessed=False)
-        # The card names somebody the index cannot identify: either no doctor
-        # has that initial, or two share it and `_load_doctor_index` dropped it
-        # rather than guess. Picking anyone here contradicts what the card says.
+        # The card names somebody no name begins with, or names a prefix two
+        # doctors share. Either way it identifies nobody, and picking one anyway
+        # would contradict what the card says.
         return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
 
-    # The row names nobody. A single doctor in the system is the only possible
-    # answer rather than a choice between candidates, so it is not a guess.
+    # The row names nobody. A single doctor is the only possible answer rather
+    # than a choice between candidates, so it is not a guess.
     if len(doctors.ids) == 1:
         return ResolvedDoctor(doctors.ids[0], guessed=False)
     return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
@@ -650,7 +712,7 @@ class VisitRow(NamedTuple):
     visit_date: date
     diagnosis_notes: str | None
     treatment_notes: str | None
-    doctor_initial: str | None
+    doctor_label: str | None
     tooth_number: int | None
     price: Decimal | None
 
@@ -693,7 +755,7 @@ def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
             visit_date=current_date,
             diagnosis_notes=diagnosis_notes,
             treatment_notes=treatment_notes,
-            doctor_initial=cell_str(row[5]) if len(row) > 5 else None,
+            doctor_label=cell_str(row[5]) if len(row) > 5 else None,
             tooth_number=extract_tooth_number(diagnosis_notes),
             price=parse_price(row),
         )
@@ -785,7 +847,7 @@ def _import_workbook(
 
     for visit_row in _iter_visit_rows(rows):
         visit_rows_seen += 1
-        resolved = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
+        resolved = _resolve_doctor(override_doctor_id, visit_row.doctor_label, doctors)
         if not resolved.id:
             rows_without_doctor += 1
             continue
@@ -820,6 +882,10 @@ def _import_workbook(
                 price=visit_row.price,
                 paid=True,
                 import_incomplete=incomplete,
+                # Kept whatever the outcome, including a clean match: the column
+                # then means one thing — what the chart said — and a match that
+                # was wrong stays detectable instead of being invisible.
+                imported_doctor_label=visit_row.doctor_label,
             )
         )
         counts["visits_created"] += 1

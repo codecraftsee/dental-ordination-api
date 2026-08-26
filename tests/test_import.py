@@ -477,7 +477,7 @@ def test_rows_with_no_resolvable_doctor_collapse_to_one_error_per_file(client):
             db,
             "card.xlsx",
             _dental_card(three_rows),
-            DoctorIndex(ids=[], by_initial={}, ambiguous={}, no_initial=[]),
+            DoctorIndex(ids=[], candidates=[], ambiguous_initials={}, unnamed=[]),
             None,
             _empty_counts(),
             errors,
@@ -629,18 +629,18 @@ def test_a_usable_doctor_index_is_logged_at_info(client, admin_token, doctor, ca
     records = _index_log(caplog)
     assert [r.levelno for r in records] == [logging.INFO]
     assert "doctor index ready" in records[0].getMessage()
-    assert "1 doctor(s), 1 usable initial(s)" in records[0].getMessage()
+    assert "1 active doctor(s), 1 matchable" in records[0].getMessage()
 
 
-def test_an_index_with_no_usable_initials_warns_and_names_the_collision(
+def test_a_shared_initial_warns_and_names_the_doctors_sharing_it(
     client, admin_token, make_user, caplog
 ):
     """Every initial shared is the case that flags a whole migration.
 
-    Two doctors, both 'M', so `by_initial` is empty and every row naming anybody
-    is guessed. The line has to carry the names: the remedy is a roster change
-    or an explicit doctor_id, and neither is choosable without knowing who
-    actually collided.
+    Two doctors, both 'M', so a card writing nothing but that letter resolves to
+    neither. The line has to carry the names: the remedy is a roster change, a
+    longer form on the card, or an explicit doctor_id, and none of those is
+    choosable without knowing who actually collided.
     """
     from app.models.user import UserRole
 
@@ -654,10 +654,9 @@ def test_an_index_with_no_usable_initials_warns_and_names_the_collision(
     assert [r.levelno for r in records] == [logging.WARNING]
 
     message = records[0].getMessage()
-    assert "doctor index unusable" in message
-    assert "2 doctor(s), 0 usable initial(s)" in message
+    assert "doctor index degraded" in message
+    assert "2 active doctor(s), 2 matchable" in message
     assert "M (Milan Tester, Marko Tester)" in message
-    assert "doctor_id" in message
 
 
 def test_a_partly_usable_index_warns_as_degraded(client, admin_token, make_user, caplog):
@@ -674,13 +673,13 @@ def test_a_partly_usable_index_warns_as_degraded(client, admin_token, make_user,
     records = _index_log(caplog)
     assert [r.levelno for r in records] == [logging.WARNING]
     assert "doctor index degraded" in records[0].getMessage()
-    assert "3 doctor(s), 1 usable initial(s)" in records[0].getMessage()
+    assert "3 active doctor(s), 3 matchable" in records[0].getMessage()
 
 
-def test_a_doctor_with_no_first_name_is_named_as_unmatchable(
+def test_a_doctor_with_only_a_surname_is_still_matchable(
     client, admin_token, doctor, make_user, caplog
 ):
-    """They stay eligible for the fallback, so their absence from the index matters."""
+    """Matching reads both names, so a missing first name is not a missing doctor."""
     from app.models.user import UserRole
 
     make_user(role=UserRole.DOCTOR, first_name="", last_name="Nameless")
@@ -689,8 +688,26 @@ def test_a_doctor_with_no_first_name_is_named_as_unmatchable(
         _post(client, admin_token, _dental_card([VISIT_ROW]))
 
     records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "2 active doctor(s), 2 matchable" in records[0].getMessage()
+
+
+def test_a_doctor_with_no_name_at_all_is_named_as_unmatchable(
+    client, admin_token, doctor, make_user, caplog
+):
+    """No name means no cell can ever select them, though they can still be a fallback."""
+    from app.models.user import UserRole
+
+    nameless = make_user(role=UserRole.DOCTOR, first_name="", last_name="")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = _index_log(caplog)
     assert [r.levelno for r in records] == [logging.WARNING]
-    assert "no first name: Nameless" in records[0].getMessage()
+    message = records[0].getMessage()
+    assert "2 active doctor(s), 1 matchable" in message
+    assert f"no name to match on: {nameless.id}" in message
 
 
 def test_an_explicit_doctor_id_silences_the_index_health_line(
@@ -922,3 +939,130 @@ def test_two_requests_get_different_tokens(client, admin_token, doctor, caplog):
 
     assert len(first) == 1
     assert len(both) == 2
+
+
+# --- Matching the card's "Dr" cell to a doctor ------------------------------
+#
+# One rule: the normalized cell must be a prefix of exactly one active doctor's
+# first or last name. An initial is simply a one-character prefix, so the old
+# initial matching is a special case of this rather than a separate path.
+
+
+def _row(dr, date="01.03.2024.", note="Caries d.16"):
+    return [date, None, note, None, "Composite filling", dr, "4.000,00 din"]
+
+
+def _milena_and_miodrag(make_user):
+    from app.models.user import UserRole
+
+    return (
+        make_user(role=UserRole.DOCTOR, first_name="Milena", last_name="Mackic"),
+        make_user(role=UserRole.DOCTOR, first_name="Miodrag", last_name="Pavkovic"),
+    )
+
+
+def _only_visit(client, token):
+    return client.get("/api/visits", headers=auth(token)).json()[0]
+
+
+def test_a_full_first_name_resolves_what_an_initial_cannot(client, admin_token, make_user):
+    """Milena and Miodrag share M, but they differ from the second character on."""
+    _, miodrag = _milena_and_miodrag(make_user)
+
+    _post(client, admin_token, _dental_card([_row("Miodrag")]))
+
+    visit = _only_visit(client, admin_token)
+    assert visit["doctor_id"] == miodrag.id
+    assert visit["import_incomplete"] is False
+
+
+def test_an_unambiguous_prefix_resolves(client, admin_token, make_user):
+    _, miodrag = _milena_and_miodrag(make_user)
+
+    _post(client, admin_token, _dental_card([_row("Mio")]))
+
+    assert _only_visit(client, admin_token)["doctor_id"] == miodrag.id
+
+
+def test_a_prefix_two_doctors_share_resolves_to_nobody(client, admin_token, make_user):
+    """Refusing is the point: doctor_id is NOT NULL, so a pick would read as fact."""
+    milena, miodrag = _milena_and_miodrag(make_user)
+
+    summary = _events(_post(client, admin_token, _dental_card([_row("Mi")])))[-1]["summary"]
+
+    assert summary["visits_incomplete"] == 1
+    visit = _only_visit(client, admin_token)
+    assert visit["doctor_id"] in {milena.id, miodrag.id}
+    assert visit["import_incomplete"] is True
+
+
+def test_a_surname_resolves_too(client, admin_token, make_user):
+    """It is not yet established whether the cards write first names or surnames."""
+    _, miodrag = _milena_and_miodrag(make_user)
+
+    _post(client, admin_token, _dental_card([_row("Pavkovic")]))
+
+    assert _only_visit(client, admin_token)["doctor_id"] == miodrag.id
+
+
+def test_punctuation_and_an_honorific_do_not_defeat_a_match(client, admin_token, doctor):
+    """`M.` and `Dr M` used to match nothing: the raw cell was looked up in a
+    dict keyed by single uppercase letters, so a card that named its doctor
+    perfectly clearly still produced a flagged visit."""
+    for dr in ("M.", " m ", "Dr M", "dr. Milan"):
+        _post(client, admin_token, _dental_card([_row(dr, note=f"Caries {dr}")]))
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert len(visits) == 4
+    assert {v["doctor_id"] for v in visits} == {doctor.id}
+    assert not any(v["import_incomplete"] for v in visits)
+
+
+def test_an_inactive_doctor_is_neither_matched_nor_used_as_a_fallback(
+    client, admin_token, doctor, make_user
+):
+    """`is_active = False` is what DELETE /api/users/{id} sets.
+
+    The clinic does not create accounts for doctors who have left, so a
+    deactivated account is a disabled or test one and must not receive new
+    clinical attribution.
+    """
+    from app.models.user import UserRole
+
+    gone = make_user(role=UserRole.DOCTOR, first_name="Zoran", is_active=False)
+
+    summary = _events(_post(client, admin_token, _dental_card([_row("Zoran")])))[-1]["summary"]
+
+    visit = _only_visit(client, admin_token)
+    assert visit["doctor_id"] != gone.id
+    assert visit["doctor_id"] == doctor.id  # the only active doctor, by fallback
+    assert visit["import_incomplete"] is True
+    assert summary["visits_incomplete"] == 1
+
+
+def test_the_card_text_is_stored_even_on_a_clean_match(client, admin_token, doctor):
+    """Every visit, so the column means one thing and a wrong match stays visible."""
+    _post(client, admin_token, _dental_card([_row("Milan")]))
+
+    visit = _only_visit(client, admin_token)
+    assert visit["import_incomplete"] is False
+    assert visit["imported_doctor_label"] == "Milan"
+
+
+def test_the_card_text_is_stored_verbatim_when_it_resolves_to_nobody(
+    client, admin_token, make_user
+):
+    """The letter is the only true fact left in a fabricated attribution."""
+    _milena_and_miodrag(make_user)
+
+    _post(client, admin_token, _dental_card([_row("M")]))
+
+    visit = _only_visit(client, admin_token)
+    assert visit["import_incomplete"] is True
+    assert visit["imported_doctor_label"] == "M"
+
+
+def test_a_row_naming_nobody_stores_no_label(client, admin_token, doctor):
+    _post(client, admin_token, _dental_card([_row(None)]))
+
+    assert _only_visit(client, admin_token)["imported_doctor_label"] is None
