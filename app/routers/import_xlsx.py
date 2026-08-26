@@ -4,6 +4,7 @@ import random
 import re
 import threading
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -333,6 +334,7 @@ def _strip_filename(errors: list[str], filename: str) -> list[str]:
 
 
 def _log_file_result(
+    run_id: str,
     filename: str,
     index: int,
     total: int,
@@ -367,7 +369,11 @@ def _log_file_result(
 
     if not committed:
         logger.warning(
-            "Import: %s (%s) FAILED — %s", filename, where, "; ".join(errors) or "unknown error"
+            "Import[%s]: %s (%s) FAILED — %s",
+            run_id,
+            filename,
+            where,
+            "; ".join(errors) or "unknown error",
         )
         return
 
@@ -377,7 +383,7 @@ def _log_file_result(
         log_detail.visits_missing_price,
     )
     if not flagged and not errors:
-        logger.info("Import: %s — %s", where, _format_counts(counts))
+        logger.info("Import[%s]: %s — %s", run_id, where, _format_counts(counts))
         return
 
     # Only the clauses that apply, so the line says what is actually wrong
@@ -387,7 +393,7 @@ def _log_file_result(
         detail += f", flagged incomplete: {flagged}"
     if errors:
         detail += f"; {'; '.join(_strip_filename(errors, filename))}"
-    logger.warning("Import: %s — %s", where, detail)
+    logger.warning("Import[%s]: %s — %s", run_id, where, detail)
 
 
 class DoctorIndex(NamedTuple):
@@ -443,7 +449,9 @@ def _load_doctor_index() -> DoctorIndex:
         db.close()
 
 
-def _log_doctor_index_health(doctors: DoctorIndex, override_doctor_id: str | None) -> None:
+def _log_doctor_index_health(
+    run_id: str, doctors: DoctorIndex, override_doctor_id: str | None
+) -> None:
     """Say once per run whether attribution can work, at a level that shows.
 
     `_import_workbook` already reports a card whose doctor could not be
@@ -480,7 +488,7 @@ def _log_doctor_index_health(doctors: DoctorIndex, override_doctor_id: str | Non
         problems.append(f"no first name: {', '.join(doctors.no_initial)}")
 
     if not problems:
-        logger.info("Import: doctor index ready — %s", counts)
+        logger.info("Import[%s]: doctor index ready — %s", run_id, counts)
         return
 
     # Nothing left to match on: every row naming an initial is guessed, so the
@@ -488,16 +496,18 @@ def _log_doctor_index_health(doctors: DoctorIndex, override_doctor_id: str | Non
     # remedy differs — this one cannot import anything trustworthy at all.
     if not doctors.by_initial:
         logger.warning(
-            "Import: doctor index unusable — %s; %s. Every visit row naming a doctor gets an "
-            "arbitrary one and is flagged import_incomplete; pass doctor_id to attribute the "
+            "Import[%s]: doctor index unusable — %s; %s. Every visit row naming a doctor gets "
+            "an arbitrary one and is flagged import_incomplete; pass doctor_id to attribute the "
             "run explicitly.",
+            run_id,
             counts,
             "; ".join(problems),
         )
     else:
         logger.warning(
-            "Import: doctor index degraded — %s; %s. Visit rows naming those get an arbitrary "
-            "doctor and are flagged import_incomplete.",
+            "Import[%s]: doctor index degraded — %s; %s. Visit rows naming those get an "
+            "arbitrary doctor and are flagged import_incomplete.",
+            run_id,
             counts,
             "; ".join(problems),
         )
@@ -863,7 +873,7 @@ def _validate_override_doctor(doctor_id: str | None) -> str | None:
         db.close()
 
 
-def _doctor_index_for_run(override_doctor_id: str | None) -> DoctorIndex:
+def _doctor_index_for_run(run_id: str, override_doctor_id: str | None) -> DoctorIndex:
     """Load the index the whole run will use, refusing the run if it is unusable.
 
     `visits.doctor_id` is NOT NULL, so with an empty `DoctorIndex` every visit
@@ -898,7 +908,7 @@ def _doctor_index_for_run(override_doctor_id: str | None) -> DoctorIndex:
         )
     # After the rejection, so the one run that never starts does not also file a
     # complaint about an index it was never going to use.
-    _log_doctor_index_health(doctors, override_doctor_id)
+    _log_doctor_index_health(run_id, doctors, override_doctor_id)
     return doctors
 
 
@@ -960,8 +970,15 @@ async def import_xlsx_files(
     `MAX_IMPORT_FILES` above is a backstop against a non-browser caller, not a
     supported request size.
     """
+    # One token per request, prefixed on every line this request writes. The
+    # frontend sends 50 files per batch, so a migration is ~160 requests whose
+    # per-file lines all say "file 12/50" — identical strings that only their
+    # timestamps separate. This makes one batch greppable, and it is per request
+    # rather than per run because the server never learns that batches belong
+    # together; giving a run one id means the client sending it.
+    run_id = uuid.uuid4().hex[:6]
     override_doctor_id = _validate_override_doctor(doctor_id)
-    doctors = _doctor_index_for_run(override_doctor_id)
+    doctors = _doctor_index_for_run(run_id, override_doctor_id)
 
     # Claimed after validation, so a rejected request never occupies the slot,
     # and before the file reads, so a second import cannot buffer its copy of
@@ -1006,7 +1023,7 @@ async def import_xlsx_files(
 
         try:
             total = len(file_data)
-            logger.info("Import: starting, %d file(s)", total)
+            logger.info("Import[%s]: starting, %d file(s)", run_id, total)
 
             for i, (filename, content) in enumerate(file_data):
                 # Proof of life for the slot's staleness check.
@@ -1058,7 +1075,7 @@ async def import_xlsx_files(
                 run_state["files_done"] = summary["files_processed"]
 
                 _log_file_result(
-                    filename, i + 1, total, committed, file_counts, file_errors, log_detail
+                    run_id, filename, i + 1, total, committed, file_counts, file_errors, log_detail
                 )
 
                 yield _sse(
@@ -1077,7 +1094,8 @@ async def import_xlsx_files(
             # run's outcome is otherwise only reconstructable by re-reading
             # every per-file line above.
             logger.info(
-                "Import: run totals over %d file(s) — %s, flagged incomplete: %s, %d error(s)",
+                "Import[%s]: run totals over %d file(s) — %s, flagged incomplete: %s, %d error(s)",
+                run_id,
                 summary["files_processed"],
                 _format_counts(summary),
                 _format_flagged(summary["patients_incomplete"], summary["visits_incomplete"])
@@ -1089,7 +1107,9 @@ async def import_xlsx_files(
         except Exception as e:
             # Previously this vanished into the summary's errors and was never
             # logged, so a run that died mid-way left the server silent.
-            logger.exception("Import: fatal error after %d file(s)", summary["files_processed"])
+            logger.exception(
+                "Import[%s]: fatal error after %d file(s)", run_id, summary["files_processed"]
+            )
             run_state["reached_end"] = True
             summary["errors"].append(f"Fatal error: {str(e)}")
             yield _sse({"type": "complete", "summary": summary})
@@ -1118,10 +1138,11 @@ async def import_xlsx_files(
         """
         _IMPORT_SLOT.release(slot_token)
         if run_state["reached_end"]:
-            logger.info("Import: finished, %d file(s)", run_state["files_done"])
+            logger.info("Import[%s]: finished, %d file(s)", run_id, run_state["files_done"])
         else:
             logger.warning(
-                "Import: client disconnected after %d of %d file(s); the rest never started",
+                "Import[%s]: client disconnected after %d of %d file(s); the rest never started",
+                run_id,
                 run_state["files_done"],
                 len(file_data),
             )

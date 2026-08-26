@@ -747,7 +747,7 @@ def test_the_index_line_is_written_once_per_run_not_once_per_file(
 
 def _file_lines(caplog) -> list[str]:
     """The per-file lines, which identify a card by position rather than by name."""
-    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Import: file ")]
+    return [m for m in (r.getMessage() for r in caplog.records) if "]: file " in m]
 
 
 def test_a_price_flag_is_named_in_the_log(client, admin_token, doctor, caplog):
@@ -796,7 +796,7 @@ def test_a_clean_file_still_logs_at_info_with_no_flag_clause(client, admin_token
     with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
         _post(client, admin_token, _dental_card([VISIT_ROW]))
 
-    records = [r for r in caplog.records if r.getMessage().startswith("Import: file ")]
+    records = [r for r in caplog.records if "]: file " in r.getMessage()]
     assert [r.levelno for r in records] == [logging.INFO]
     assert "flagged" not in records[0].getMessage()
 
@@ -834,7 +834,7 @@ def test_a_clean_file_is_logged_by_position_not_by_name(client, admin_token, doc
         _post(client, admin_token, _dental_card([VISIT_ROW]), filename="Marko Petrovic.xlsx")
 
     line = _file_lines(caplog)[0]
-    assert line.startswith("Import: file 1/1 —")
+    assert "]: file 1/1 —" in line
     assert "Marko" not in line
 
 
@@ -879,3 +879,46 @@ def test_a_failed_file_keeps_its_name_because_nothing_else_has_it(
     assert len(failed) == 1
     assert "Marko Petrovic.xlsx" in failed[0]
     assert "file 1/1" in failed[0]
+
+
+# --- The per-request token --------------------------------------------------
+
+
+def _run_ids(caplog) -> list[str]:
+    ids = [
+        m.split("]", 1)[0][len("Import[") :]
+        for m in (r.getMessage() for r in caplog.records)
+        if m.startswith("Import[")
+    ]
+    return ids
+
+
+def test_every_line_of_one_request_carries_the_same_token(client, admin_token, doctor, caplog):
+    """Positions repeat across batches, so the token is what groups them."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        client.post(
+            "/api/import/xlsx",
+            files=[
+                ("files", ("a.xlsx", _dental_card([VISIT_ROW]), XLSX_MIME)),
+                ("files", ("b.xlsx", _dental_card([VISIT_ROW], first_name="Jelena"), XLSX_MIME)),
+            ],
+            headers=auth(admin_token),
+        )
+
+    ids = _run_ids(caplog)
+    # start, index health, two per-file lines, run totals, finished
+    assert len(ids) >= 6
+    assert len(set(ids)) == 1
+
+
+def test_two_requests_get_different_tokens(client, admin_token, doctor, caplog):
+    """A migration is ~160 requests; they have to be tellable apart."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), filename="a.xlsx")
+        first = set(_run_ids(caplog))
+
+        _post(client, admin_token, _dental_card([VISIT_ROW], first_name="Jelena"), "b.xlsx")
+        both = set(_run_ids(caplog))
+
+    assert len(first) == 1
+    assert len(both) == 2
