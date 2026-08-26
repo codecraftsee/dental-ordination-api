@@ -6,6 +6,7 @@ payload keys, which is the contract that must survive the import refactor.
 """
 
 import json
+import logging
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -476,7 +477,7 @@ def test_rows_with_no_resolvable_doctor_collapse_to_one_error_per_file(client):
             db,
             "card.xlsx",
             _dental_card(three_rows),
-            DoctorIndex([], {}),
+            DoctorIndex(ids=[], by_initial={}, ambiguous={}, no_initial=[]),
             None,
             _empty_counts(),
             errors,
@@ -603,3 +604,321 @@ def test_an_unknown_doctor_id_is_rejected_before_streaming(client, admin_token):
     )
     assert resp.status_code == 400
     assert "not found" in resp.json()["detail"]
+
+
+# --- The doctor-index health line ------------------------------------------
+#
+# The importer reports a card whose doctor could not be identified once per
+# file, so a run against a collided index repeats that symptom for every card it
+# reads. The cause — which initials collapsed, and who collapsed them — is one
+# line per run, and these pin it: its level tracks whether attribution can work
+# at all, because that is what decides whether somebody has to intervene.
+
+LOGGER_NAME = "app.routers.import_xlsx"
+
+
+def _index_log(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "doctor index" in r.getMessage()]
+
+
+def test_a_usable_doctor_index_is_logged_at_info(client, admin_token, doctor, caplog):
+    """One doctor, one matchable initial: nothing needs a human, so nothing warns."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "doctor index ready" in records[0].getMessage()
+    assert "1 doctor(s), 1 usable initial(s)" in records[0].getMessage()
+
+
+def test_an_index_with_no_usable_initials_warns_and_names_the_collision(
+    client, admin_token, make_user, caplog
+):
+    """Every initial shared is the case that flags a whole migration.
+
+    Two doctors, both 'M', so `by_initial` is empty and every row naming anybody
+    is guessed. The line has to carry the names: the remedy is a roster change
+    or an explicit doctor_id, and neither is choosable without knowing who
+    actually collided.
+    """
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+
+    message = records[0].getMessage()
+    assert "doctor index unusable" in message
+    assert "2 doctor(s), 0 usable initial(s)" in message
+    assert "M (Milan Tester, Marko Tester)" in message
+    assert "doctor_id" in message
+
+
+def test_a_partly_usable_index_warns_as_degraded(client, admin_token, make_user, caplog):
+    """Some initials still resolve, so the run is worth starting — but not silently."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+    make_user(role=UserRole.DOCTOR, first_name="Ana")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "doctor index degraded" in records[0].getMessage()
+    assert "3 doctor(s), 1 usable initial(s)" in records[0].getMessage()
+
+
+def test_a_doctor_with_no_first_name_is_named_as_unmatchable(
+    client, admin_token, doctor, make_user, caplog
+):
+    """They stay eligible for the fallback, so their absence from the index matters."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="", last_name="Nameless")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "no first name: Nameless" in records[0].getMessage()
+
+
+def test_an_explicit_doctor_id_silences_the_index_health_line(
+    client, admin_token, make_user, caplog
+):
+    """`_resolve_doctor` never consults the index here, so its health is not news."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    chosen = make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), doctor_id=chosen.id)
+
+    assert _index_log(caplog) == []
+
+
+def test_the_index_line_is_written_once_per_run_not_once_per_file(
+    client, admin_token, make_user, caplog
+):
+    """The point of the line: one cause against N symptoms.
+
+    Two cards for two different patients each report their unidentifiable
+    doctor, as they did before. The explanation is written once — which is why
+    it is worth reading at 8000 files, where the per-file lines are not.
+    """
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        client.post(
+            "/api/import/xlsx",
+            files=[
+                ("files", ("a.xlsx", _dental_card([VISIT_ROW]), XLSX_MIME)),
+                ("files", ("b.xlsx", _dental_card([VISIT_ROW], first_name="Jelena"), XLSX_MIME)),
+            ],
+            headers=auth(admin_token),
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("doctor index" in m for m in messages) == 1
+    assert sum("Could not identify the doctor" in m for m in messages) == 2
+
+
+# --- What the per-file line says a flag was for ----------------------------
+#
+# Every other cause of an `import_incomplete` flag appends an error string that
+# the per-file line prints. A missing price is the only one that does not, so it
+# is named explicitly; and patients and visits are reported apart, because one
+# flagged patient and twelve flagged visits are different problems.
+
+
+def _file_lines(caplog) -> list[str]:
+    """The per-file lines, which identify a card by position rather than by name."""
+    return [m for m in (r.getMessage() for r in caplog.records) if "]: file " in m]
+
+
+def test_a_price_flag_is_named_in_the_log(client, admin_token, doctor, caplog):
+    """Otherwise the line reports a count with no reason anywhere on it."""
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row]))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 visit(s), 1 of them for a missing price" in line
+
+
+def test_flagged_patients_and_visits_are_reported_apart(client, admin_token, doctor, caplog):
+    """A bad gender flags the patient; a missing price flags the visit."""
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row], gender="?"))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 patient(s), 1 visit(s)" in line
+    # The patient's own reason already travels as an error string.
+    assert "Invalid gender" in line
+
+
+def test_a_visit_flagged_only_for_its_doctor_does_not_claim_a_price_problem(
+    client, admin_token, make_user, caplog
+):
+    """The price clause appears only when a price is actually missing."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 visit(s)" in line
+    assert "missing price" not in line
+    assert "Could not identify the doctor" in line
+
+
+def test_a_clean_file_still_logs_at_info_with_no_flag_clause(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = [r for r in caplog.records if "]: file " in r.getMessage()]
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "flagged" not in records[0].getMessage()
+
+
+def test_the_run_rollup_splits_flagged_records_by_kind(client, admin_token, doctor, caplog):
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row], gender="?"))
+
+    rollup = [m for m in (r.getMessage() for r in caplog.records) if "run totals" in m][0]
+    assert "flagged incomplete: 1 patient(s), 1 visit(s)" in rollup
+
+
+def test_the_run_rollup_says_none_when_nothing_was_flagged(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    rollup = [m for m in (r.getMessage() for r in caplog.records) if "run totals" in m][0]
+    assert "flagged incomplete: none" in rollup
+
+
+# --- Patient names in a journal that outlives the deploy --------------------
+#
+# A card is named after the patient, and since the container moved to the
+# journald driver these lines survive for months, outside the database and
+# untouched by deleting that patient through the API. So the name is written
+# only where nothing else records it: a failed file rolled back and left no row
+# behind, while a flagged file's records sit in the database wearing
+# `import_incomplete` and can be listed from there.
+
+
+def test_a_clean_file_is_logged_by_position_not_by_name(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), filename="Marko Petrovic.xlsx")
+
+    line = _file_lines(caplog)[0]
+    assert "]: file 1/1 —" in line
+    assert "Marko" not in line
+
+
+def test_a_flagged_file_is_logged_by_position_not_by_name(client, admin_token, doctor, caplog):
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row]), filename="Marko Petrovic.xlsx")
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete" in line
+    assert "Marko" not in line
+
+
+def test_an_error_string_does_not_smuggle_the_filename_back_in(client, admin_token, doctor, caplog):
+    """Every error is built as `f"{filename}: ..."`, so the prefix has to go too.
+
+    Without stripping it the line would omit the name from its own prefix and
+    then print it verbatim inside the first error — sanitising nothing.
+    """
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(
+            client,
+            admin_token,
+            _dental_card([VISIT_ROW], gender="?"),
+            filename="Marko Petrovic.xlsx",
+        )
+
+    line = _file_lines(caplog)[0]
+    assert "Invalid gender" in line, "the reason must survive the stripping"
+    assert "Marko Petrovic.xlsx" not in line
+
+
+def test_a_failed_file_keeps_its_name_because_nothing_else_has_it(
+    client, admin_token, doctor, caplog
+):
+    """The transaction rolled back, so this line is the only trace it was read."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, b"definitely not a workbook", filename="Marko Petrovic.xlsx")
+
+    failed = [r.getMessage() for r in caplog.records if "FAILED" in r.getMessage()]
+    assert len(failed) == 1
+    assert "Marko Petrovic.xlsx" in failed[0]
+    assert "file 1/1" in failed[0]
+
+
+# --- The per-request token --------------------------------------------------
+
+
+def _run_ids(caplog) -> list[str]:
+    ids = [
+        m.split("]", 1)[0][len("Import[") :]
+        for m in (r.getMessage() for r in caplog.records)
+        if m.startswith("Import[")
+    ]
+    return ids
+
+
+def test_every_line_of_one_request_carries_the_same_token(client, admin_token, doctor, caplog):
+    """Positions repeat across batches, so the token is what groups them."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        client.post(
+            "/api/import/xlsx",
+            files=[
+                ("files", ("a.xlsx", _dental_card([VISIT_ROW]), XLSX_MIME)),
+                ("files", ("b.xlsx", _dental_card([VISIT_ROW], first_name="Jelena"), XLSX_MIME)),
+            ],
+            headers=auth(admin_token),
+        )
+
+    ids = _run_ids(caplog)
+    # start, index health, two per-file lines, run totals, finished
+    assert len(ids) >= 6
+    assert len(set(ids)) == 1
+
+
+def test_two_requests_get_different_tokens(client, admin_token, doctor, caplog):
+    """A migration is ~160 requests; they have to be tellable apart."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), filename="a.xlsx")
+        first = set(_run_ids(caplog))
+
+        _post(client, admin_token, _dental_card([VISIT_ROW], first_name="Jelena"), "b.xlsx")
+        both = set(_run_ids(caplog))
+
+    assert len(first) == 1
+    assert len(both) == 2
