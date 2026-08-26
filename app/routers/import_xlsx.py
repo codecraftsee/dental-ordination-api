@@ -1,6 +1,5 @@
 import json
 import logging
-import random
 import re
 import threading
 import time
@@ -588,32 +587,37 @@ def _resolve_doctor(
     override_doctor_id: str | None,
     doctor_label: str | None,
     doctors: DoctorIndex,
+    fallback_doctor_id: str | None,
 ) -> ResolvedDoctor:
-    """A caller-supplied doctor wins, then a name match, then the fallback."""
+    """A caller-supplied doctor wins, then a name match, then the fallback.
+
+    The fallback replaces a `random.choice` over every doctor in the system.
+    Random attribution was wrong twice over: it invented a clinical fact, and it
+    was not even stable — re-importing the same card could attribute it to
+    somebody else. A fallback the caller nominated is still not a statement
+    about who did the work, but it is at least a decision somebody made, and it
+    is the same decision every time the card is read.
+
+    `fallback_doctor_id` is None only when `_import_workbook` is driven directly
+    with an empty index; the endpoint refuses such a run before it starts. The
+    caller then sees `id is None` and skips the row, as it always did.
+    """
     if override_doctor_id:
         return ResolvedDoctor(override_doctor_id, guessed=False)
-
-    # Nobody to attribute to. `_doctor_index_for_run` refuses an empty index
-    # before the run starts, and the run then carries that same index all the
-    # way through, so this is unreachable in practice — it exists so the type
-    # stays honest rather than as a live branch.
-    if not doctors.ids:
-        return ResolvedDoctor(None, guessed=False)
 
     if doctor_label:
         matched = _match_doctor(doctor_label, doctors.candidates)
         if matched:
             return ResolvedDoctor(matched, guessed=False)
-        # The card names somebody no name begins with, or names a prefix two
-        # doctors share. Either way it identifies nobody, and picking one anyway
-        # would contradict what the card says.
-        return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+        # The card names somebody no name begins with, or a prefix two doctors
+        # share. Either way it identifies nobody, and the fallback contradicts
+        # what the card says — so this one is flagged for a human.
+        return ResolvedDoctor(fallback_doctor_id, guessed=True)
 
-    # The row names nobody. A single doctor is the only possible answer rather
-    # than a choice between candidates, so it is not a guess.
-    if len(doctors.ids) == 1:
-        return ResolvedDoctor(doctors.ids[0], guessed=False)
-    return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+    # The row names nobody, so nothing contradicts the fallback: the caller was
+    # asked who should own exactly these rows and answered. Not a guess, and not
+    # flagged — that is what keeps the review queue to the rows in real doubt.
+    return ResolvedDoctor(fallback_doctor_id, guessed=False)
 
 
 # The contact columns a later card may supply that an earlier one left empty.
@@ -767,6 +771,7 @@ def _import_workbook(
     content: bytes,
     doctors: DoctorIndex,
     override_doctor_id: str | None,
+    fallback_doctor_id: str | None,
     counts: dict,
     errors: list[str],
 ) -> FileLogDetail:
@@ -847,7 +852,9 @@ def _import_workbook(
 
     for visit_row in _iter_visit_rows(rows):
         visit_rows_seen += 1
-        resolved = _resolve_doctor(override_doctor_id, visit_row.doctor_label, doctors)
+        resolved = _resolve_doctor(
+            override_doctor_id, visit_row.doctor_label, doctors, fallback_doctor_id
+        )
         if not resolved.id:
             rows_without_doctor += 1
             continue
@@ -912,34 +919,58 @@ def _import_workbook(
     if rows_with_guessed_doctor:
         errors.append(
             f"{filename}: Could not identify the doctor for {rows_with_guessed_doctor} "
-            "visit row(s); assigned an arbitrary one and flagged them for review"
+            "visit row(s); assigned the fallback doctor and flagged them for review"
         )
 
     return FileLogDetail(visits_missing_price=visits_missing_price)
 
 
-def _validate_override_doctor(doctor_id: str | None) -> str | None:
-    """Check a caller-supplied doctor_id before the response starts streaming.
+# Who a caller may name to receive visits. DOCTOR is the obvious one; ADMIN is
+# here because the clinic's administrator also practises, and `User.role` holds
+# a single value, so the alternative was a second account for one person.
+# Matching never targets an admin — cards name doctors — but an explicit choice
+# may.
+ATTRIBUTABLE_ROLES = (UserRole.DOCTOR, UserRole.ADMIN)
 
-    Once the StreamingResponse begins, the status code is already sent — so a
-    bad id has to be rejected here to surface as a real HTTP 400.
+
+def _validate_attributable(user_id: str | None, field: str) -> str | None:
+    """Check a caller-named doctor before the response starts streaming.
+
+    Once the StreamingResponse begins the status code is already sent, so a bad
+    id has to be rejected here to surface as a real HTTP 400 rather than as an
+    error buried in an event the frontend shows in a list.
+
+    Inactive users are refused. They are excluded from matching and from the
+    fallback pool, and an explicit id that quietly escaped that rule would make
+    "deactivated" mean nothing — `DELETE /api/users/{id}` is a soft delete, so
+    this is the same check that stops a deleted account being handed new work.
     """
-    if not doctor_id:
+    if not user_id:
         return None
     db = SessionLocal()
     try:
-        doctor = db.query(User).filter(User.id == doctor_id, User.role == UserRole.DOCTOR).first()
-        if not doctor:
+        user = (
+            db.query(User)
+            .filter(
+                User.id == user_id,
+                User.role.in_(ATTRIBUTABLE_ROLES),
+                User.is_active == True,  # noqa: E712 — SQL comparison, not a Python bool test
+            )
+            .first()
+        )
+        if not user:
             raise HTTPException(
                 status_code=400,
-                detail=f"Doctor with id {doctor_id} not found",
+                detail=f"{field}: no active doctor with id {user_id} found",
             )
-        return doctor.id
+        return user.id
     finally:
         db.close()
 
 
-def _doctor_index_for_run(run_id: str, override_doctor_id: str | None) -> DoctorIndex:
+def _doctor_index_for_run(
+    run_id: str, override_doctor_id: str | None, fallback_doctor_id: str | None
+) -> tuple[DoctorIndex, str | None]:
     """Load the index the whole run will use, refusing the run if it is unusable.
 
     `visits.doctor_id` is NOT NULL, so with an empty `DoctorIndex` every visit
@@ -964,24 +995,44 @@ def _doctor_index_for_run(run_id: str, override_doctor_id: str | None) -> Doctor
     visit it reads.
     """
     doctors = _load_doctor_index()
-    if not override_doctor_id and not doctors.ids:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No doctors in the system. Create a user with the DOCTOR role, "
-                "or pass doctor_id, before importing."
-            ),
-        )
-    # After the rejection, so the one run that never starts does not also file a
+    fallback = None
+
+    if not override_doctor_id:
+        if not doctors.ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No active doctors in the system. Create a user with the DOCTOR role, "
+                    "or pass doctor_id, before importing."
+                ),
+            )
+
+        # A run must know who owns the rows it cannot attribute, before it
+        # writes any of them. One active doctor is the only possible answer
+        # rather than a choice, so it does not need asking for; more than one
+        # does, and guessing is what this whole change exists to stop.
+        fallback = fallback_doctor_id or (doctors.ids[0] if len(doctors.ids) == 1 else None)
+        if not fallback:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Several doctors exist, so visits whose doctor cannot be identified "
+                    "have no owner. Pass fallback_doctor_id to say who should receive them, "
+                    "or doctor_id to attribute the whole import to one doctor."
+                ),
+            )
+
+    # After the rejections, so a run that never starts does not also file a
     # complaint about an index it was never going to use.
     _log_doctor_index_health(run_id, doctors, override_doctor_id)
-    return doctors
+    return doctors, fallback
 
 
 @router.post("/xlsx")
 async def import_xlsx_files(
     files: list[UploadFile] = File(...),
     doctor_id: str | None = Form(None),
+    fallback_doctor_id: str | None = Form(None),
     # Named `_` like every other router: the value is never read, but the
     # dependency is what makes this endpoint admin-only. Deleting it because a
     # linter calls the argument unused would open patient-data import to every
@@ -1006,14 +1057,29 @@ async def import_xlsx_files(
     is many requests, so the slot is claimed and released per batch, not for the
     run as a whole.
 
-    If `doctor_id` is provided, that doctor is assigned to every imported visit,
-    overriding per-row initial matching and the random fallback. If omitted, the
-    original behaviour applies (match by first-name initial, fall back to random)
-    and the system must contain at least one DOCTOR user — otherwise the request
-    is rejected with a 400 rather than importing patients whose visits would all
-    be dropped for want of anyone to attribute them to. A visit that falls back
-    to an arbitrary doctor is flagged `import_incomplete` and counted in the
-    summary's errors, so a fabricated attribution never reads as fact.
+    Two form fields decide attribution, and they are alternatives:
+
+    - `doctor_id` assigns that one doctor to every imported visit, skipping the
+      cards entirely. Nothing is flagged, because the caller has said who it was.
+    - `fallback_doctor_id` keeps per-card matching and says only who receives
+      the rows that matching cannot identify.
+
+    With neither, the run needs at least one active doctor, and — if more than
+    one exists — a `fallback_doctor_id`, or it is rejected with a 400 before the
+    stream opens. A single active doctor is the only possible answer rather than
+    a choice, so it is used without being asked for.
+
+    Matching reads the card's "Dr" cell as a name: the normalized text must be a
+    prefix of exactly one active doctor's first or last name, so `Miodrag` and
+    `Mio` identify him while `M` fits him and Milena both and therefore
+    identifies nobody. Whatever the cell said is stored verbatim on the visit as
+    `imported_doctor_label`, on every row, so a flagged visit can be resolved
+    later rather than only dismissed.
+
+    A row the card *named* but matching could not identify goes to the fallback
+    and is flagged `import_incomplete`, because the fallback contradicts what the
+    card says. A row naming nobody is not flagged: nothing contradicts the
+    fallback, and the caller was asked who should own exactly those rows.
 
     Streams three event types:
     - progress: emitted before each file starts processing
@@ -1043,8 +1109,9 @@ async def import_xlsx_files(
     # rather than per run because the server never learns that batches belong
     # together; giving a run one id means the client sending it.
     run_id = uuid.uuid4().hex[:6]
-    override_doctor_id = _validate_override_doctor(doctor_id)
-    doctors = _doctor_index_for_run(run_id, override_doctor_id)
+    override_doctor_id = _validate_attributable(doctor_id, "doctor_id")
+    run_fallback_id = _validate_attributable(fallback_doctor_id, "fallback_doctor_id")
+    doctors, run_fallback_id = _doctor_index_for_run(run_id, override_doctor_id, run_fallback_id)
 
     # Claimed after validation, so a rejected request never occupies the slot,
     # and before the file reads, so a second import cannot buffer its copy of
@@ -1120,6 +1187,7 @@ async def import_xlsx_files(
                         content,
                         doctors,
                         override_doctor_id,
+                        run_fallback_id,
                         file_counts,
                         file_errors,
                     )
