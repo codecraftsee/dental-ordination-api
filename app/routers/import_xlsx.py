@@ -320,8 +320,22 @@ def _format_flagged(patients: int, visits: int, missing_price: int = 0) -> str:
     return ", ".join(parts)
 
 
+def _strip_filename(errors: list[str], filename: str) -> list[str]:
+    """Drop the `{filename}: ` prefix every error string is built with.
+
+    Without this the sanitising below achieves nothing: the line would omit the
+    filename from its own prefix and then print it again inside the first error.
+    Left intact on any string that does not carry the prefix, which today is
+    none of them — every `errors.append` in this module uses it.
+    """
+    prefix = f"{filename}: "
+    return [e[len(prefix) :] if e.startswith(prefix) else e for e in errors]
+
+
 def _log_file_result(
     filename: str,
+    index: int,
+    total: int,
     committed: bool,
     counts: dict,
     errors: list[str],
@@ -338,9 +352,23 @@ def _log_file_result(
     Levels are chosen so `journalctl -p warning` is the review queue: anything
     needing a human — a failed file, a flagged record, a card that parsed but
     complained — is a warning, and a clean file is info.
+
+    The filename is a patient's name, and since the container switched to the
+    journald driver these lines outlive deploys by months — outside the
+    database, outside the app's roles, and untouched by deleting the patient
+    through the API. So it is written only where nothing else records it: a
+    failed file rolled its transaction back and left no row anywhere, making
+    this line the sole evidence it was ever read. A flagged file is the
+    opposite — its records are in the database carrying `import_incomplete`, so
+    they can be listed from there whenever somebody wants them, and the position
+    is enough to say how far along the run it happened.
     """
+    where = f"file {index}/{total}"
+
     if not committed:
-        logger.warning("Import: %s FAILED — %s", filename, "; ".join(errors) or "unknown error")
+        logger.warning(
+            "Import: %s (%s) FAILED — %s", filename, where, "; ".join(errors) or "unknown error"
+        )
         return
 
     flagged = _format_flagged(
@@ -349,7 +377,7 @@ def _log_file_result(
         log_detail.visits_missing_price,
     )
     if not flagged and not errors:
-        logger.info("Import: %s — %s", filename, _format_counts(counts))
+        logger.info("Import: %s — %s", where, _format_counts(counts))
         return
 
     # Only the clauses that apply, so the line says what is actually wrong
@@ -358,8 +386,8 @@ def _log_file_result(
     if flagged:
         detail += f", flagged incomplete: {flagged}"
     if errors:
-        detail += f"; {'; '.join(errors)}"
-    logger.warning("Import: %s — %s", filename, detail)
+        detail += f"; {'; '.join(_strip_filename(errors, filename))}"
+    logger.warning("Import: %s — %s", where, detail)
 
 
 class DoctorIndex(NamedTuple):
@@ -1029,7 +1057,9 @@ async def import_xlsx_files(
                 summary["files_processed"] += 1
                 run_state["files_done"] = summary["files_processed"]
 
-                _log_file_result(filename, committed, file_counts, file_errors, log_detail)
+                _log_file_result(
+                    filename, i + 1, total, committed, file_counts, file_errors, log_detail
+                )
 
                 yield _sse(
                     {

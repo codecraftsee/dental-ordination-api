@@ -746,9 +746,8 @@ def test_the_index_line_is_written_once_per_run_not_once_per_file(
 
 
 def _file_lines(caplog) -> list[str]:
-    return [
-        r.getMessage() for r in caplog.records if r.getMessage().startswith("Import: card.xlsx")
-    ]
+    """The per-file lines, which identify a card by position rather than by name."""
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Import: file ")]
 
 
 def test_a_price_flag_is_named_in_the_log(client, admin_token, doctor, caplog):
@@ -797,7 +796,7 @@ def test_a_clean_file_still_logs_at_info_with_no_flag_clause(client, admin_token
     with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
         _post(client, admin_token, _dental_card([VISIT_ROW]))
 
-    records = [r for r in caplog.records if r.getMessage().startswith("Import: card.xlsx")]
+    records = [r for r in caplog.records if r.getMessage().startswith("Import: file ")]
     assert [r.levelno for r in records] == [logging.INFO]
     assert "flagged" not in records[0].getMessage()
 
@@ -818,3 +817,65 @@ def test_the_run_rollup_says_none_when_nothing_was_flagged(client, admin_token, 
 
     rollup = [m for m in (r.getMessage() for r in caplog.records) if "run totals" in m][0]
     assert "flagged incomplete: none" in rollup
+
+
+# --- Patient names in a journal that outlives the deploy --------------------
+#
+# A card is named after the patient, and since the container moved to the
+# journald driver these lines survive for months, outside the database and
+# untouched by deleting that patient through the API. So the name is written
+# only where nothing else records it: a failed file rolled back and left no row
+# behind, while a flagged file's records sit in the database wearing
+# `import_incomplete` and can be listed from there.
+
+
+def test_a_clean_file_is_logged_by_position_not_by_name(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), filename="Marko Petrovic.xlsx")
+
+    line = _file_lines(caplog)[0]
+    assert line.startswith("Import: file 1/1 —")
+    assert "Marko" not in line
+
+
+def test_a_flagged_file_is_logged_by_position_not_by_name(client, admin_token, doctor, caplog):
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row]), filename="Marko Petrovic.xlsx")
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete" in line
+    assert "Marko" not in line
+
+
+def test_an_error_string_does_not_smuggle_the_filename_back_in(client, admin_token, doctor, caplog):
+    """Every error is built as `f"{filename}: ..."`, so the prefix has to go too.
+
+    Without stripping it the line would omit the name from its own prefix and
+    then print it verbatim inside the first error — sanitising nothing.
+    """
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(
+            client,
+            admin_token,
+            _dental_card([VISIT_ROW], gender="?"),
+            filename="Marko Petrovic.xlsx",
+        )
+
+    line = _file_lines(caplog)[0]
+    assert "Invalid gender" in line, "the reason must survive the stripping"
+    assert "Marko Petrovic.xlsx" not in line
+
+
+def test_a_failed_file_keeps_its_name_because_nothing_else_has_it(
+    client, admin_token, doctor, caplog
+):
+    """The transaction rolled back, so this line is the only trace it was read."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, b"definitely not a workbook", filename="Marko Petrovic.xlsx")
+
+    failed = [r.getMessage() for r in caplog.records if "FAILED" in r.getMessage()]
+    assert len(failed) == 1
+    assert "Marko Petrovic.xlsx" in failed[0]
+    assert "file 1/1" in failed[0]
