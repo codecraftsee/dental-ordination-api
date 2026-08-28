@@ -1,9 +1,9 @@
 import json
 import logging
-import random
 import re
 import threading
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -278,38 +278,300 @@ def _empty_counts() -> dict:
     }
 
 
+def _format_counts(counts: dict) -> str:
+    """The counters as one human-readable clause, shared by the per-file and run lines."""
+    return (
+        f"patients +{counts['patients_created']} "
+        f"({counts['patients_found']} matched, {counts['patients_updated']} filled), "
+        f"visits +{counts['visits_created']} ({counts['visits_skipped']} skipped)"
+    )
+
+
+class FileLogDetail(NamedTuple):
+    """Per-file facts that belong in the journal but not in the SSE payload.
+
+    `counts` is spread into the `file_done` event verbatim (`**file_counts`), so
+    a counter added there joins the contract the Angular app parses and the
+    characterization tests pin. A missing price is worth explaining in a log
+    line and is not worth a frontend change, so it travels here instead.
+    """
+
+    visits_missing_price: int = 0
+
+
+def _format_flagged(patients: int, visits: int, missing_price: int = 0) -> str:
+    """Which records were flagged, split by kind.
+
+    Summed, the number cannot distinguish one flagged patient from twelve
+    flagged visits, which are different problems with different remedies.
+    """
+    parts = []
+    if patients:
+        parts.append(f"{patients} patient(s)")
+    if visits:
+        visits_part = f"{visits} visit(s)"
+        # Every other cause of a flag appends an error string that the caller
+        # prints alongside this clause. A missing price is the only one that
+        # does not, so without naming it here a price-flagged file reports a
+        # count and no reason at all.
+        if missing_price:
+            visits_part += f", {missing_price} of them for a missing price"
+        parts.append(visits_part)
+    return ", ".join(parts)
+
+
+def _strip_filename(errors: list[str], filename: str) -> list[str]:
+    """Drop the `{filename}: ` prefix every error string is built with.
+
+    Without this the sanitising below achieves nothing: the line would omit the
+    filename from its own prefix and then print it again inside the first error.
+    Left intact on any string that does not carry the prefix, which today is
+    none of them — every `errors.append` in this module uses it.
+    """
+    prefix = f"{filename}: "
+    return [e[len(prefix) :] if e.startswith(prefix) else e for e in errors]
+
+
+def _log_file_result(
+    run_id: str,
+    filename: str,
+    index: int,
+    total: int,
+    committed: bool,
+    counts: dict,
+    errors: list[str],
+    log_detail: FileLogDetail,
+) -> None:
+    """Write one durable line per file.
+
+    These numbers are already computed for the `file_done` SSE event, but that
+    event only ever reaches the browser tab that started the run and is gone
+    when it closes. Nothing on the server recorded which file failed, or which
+    one produced records that need review, so a migration could only be audited
+    while somebody was watching it happen.
+
+    Levels are chosen so `journalctl -p warning` is the review queue: anything
+    needing a human — a failed file, a flagged record, a card that parsed but
+    complained — is a warning, and a clean file is info.
+
+    The filename is a patient's name, and since the container switched to the
+    journald driver these lines outlive deploys by months — outside the
+    database, outside the app's roles, and untouched by deleting the patient
+    through the API. So it is written only where nothing else records it: a
+    failed file rolled its transaction back and left no row anywhere, making
+    this line the sole evidence it was ever read. A flagged file is the
+    opposite — its records are in the database carrying `import_incomplete`, so
+    they can be listed from there whenever somebody wants them, and the position
+    is enough to say how far along the run it happened.
+    """
+    where = f"file {index}/{total}"
+
+    if not committed:
+        logger.warning(
+            "Import[%s]: %s (%s) FAILED — %s",
+            run_id,
+            filename,
+            where,
+            "; ".join(errors) or "unknown error",
+        )
+        return
+
+    flagged = _format_flagged(
+        counts["patients_incomplete"],
+        counts["visits_incomplete"],
+        log_detail.visits_missing_price,
+    )
+    if not flagged and not errors:
+        logger.info("Import[%s]: %s — %s", run_id, where, _format_counts(counts))
+        return
+
+    # Only the clauses that apply, so the line says what is actually wrong
+    # rather than trailing a "0 flagged incomplete" behind a parse complaint.
+    detail = _format_counts(counts)
+    if flagged:
+        detail += f", flagged incomplete: {flagged}"
+    if errors:
+        detail += f"; {'; '.join(_strip_filename(errors, filename))}"
+    logger.warning("Import[%s]: %s — %s", run_id, where, detail)
+
+
+class DoctorCandidate(NamedTuple):
+    id: str
+    first_name: str
+    last_name: str
+
+
 class DoctorIndex(NamedTuple):
+    # Active doctors only, in both roles this serves: who a card can be matched
+    # against, and who may receive a visit whose doctor is unidentified. A
+    # deactivated account is a departed or disabled user, and the clinic does
+    # not create accounts for doctors who have left, so nothing here needs them.
     ids: list[str]
-    by_initial: dict[str, str]
+    candidates: list[DoctorCandidate]
+    # Doctors sharing a first initial, kept rather than discarded. A card that
+    # writes only that letter cannot be resolved to either of them, and this is
+    # the only explanation for a run that flags most of what it imports —
+    # reconstructing it afterwards means querying the user table by hand.
+    #
+    # Required rather than defaulted: a NamedTuple's defaults are one shared
+    # object per field, so an empty default here would be the same dict handed
+    # to every index that omitted it.
+    ambiguous_initials: dict[str, list[str]]
+    unnamed: list[str]
+
+
+def _doctor_label(doc: User) -> str:
+    """A doctor as a log line should name them; the id only if they have no name."""
+    return f"{doc.first_name or ''} {doc.last_name or ''}".strip() or doc.id
+
+
+# "Dr M", "dr. Milena" — an honorific the cards may or may not carry, which is
+# not part of anybody's name and must not be matched against one.
+_HONORIFIC = re.compile(r"^dr\.?\s*", re.IGNORECASE)
+
+
+def _normalize_doctor_label(raw: str | None) -> str | None:
+    """The card's doctor cell reduced to something comparable with a name.
+
+    The cell is filled in by hand across an archive spanning years, so it may
+    say `M`, `M.`, ` Mi `, `Dr M` or `Miodrag`. Only the first of those used to
+    match anything: the raw cell was looked up in a dict keyed by single
+    uppercase letters, so punctuation or an honorific meant no match and a
+    flagged visit, for a card that named its doctor perfectly clearly.
+    """
+    if not raw:
+        return None
+    text = _HONORIFIC.sub("", raw.strip())
+    text = text.strip(" .,;:-_/\\").strip()
+    return text.casefold() or None
+
+
+def _match_doctor(raw_label: str | None, candidates: list[DoctorCandidate]) -> str | None:
+    """The one doctor whose name the card's cell begins, or None.
+
+    One rule covers every form the cell takes, because an initial is just a
+    one-character prefix: `Miodrag` and `Mio` identify Miodrag Pavkovic, while
+    `Mi` and `M` fit both him and Milena and therefore identify nobody. Refusing
+    an ambiguous match is the point — `visits.doctor_id` is NOT NULL, so picking
+    one anyway would write a fabricated attribution that reads as fact.
+
+    First and last names both, since it is not yet established whether the cards
+    name doctors by one or the other. A doctor matching on both counts once.
+    """
+    key = _normalize_doctor_label(raw_label)
+    if not key:
+        return None
+    hits = {
+        c.id
+        for c in candidates
+        if (c.first_name or "").casefold().startswith(key)
+        or (c.last_name or "").casefold().startswith(key)
+    }
+    return hits.pop() if len(hits) == 1 else None
 
 
 def _load_doctor_index() -> DoctorIndex:
-    """Map each *unambiguous* first-name initial to a doctor id.
+    """Load the active doctors a run may match against and attribute to.
 
-    An initial shared by two doctors is dropped rather than guessed at.
+    Inactive users are excluded from both. `is_active = False` is what
+    `DELETE /api/users/{id}` sets, and the clinic does not create accounts for
+    doctors who have left — so a deactivated account is a disabled or test one,
+    and neither should receive new clinical attribution.
     """
     db = SessionLocal()
     try:
-        doctors = db.query(User).filter(User.role == UserRole.DOCTOR).all()
-        by_initial: dict[str, str] = {}
-        ambiguous: set[str] = set()
+        doctors = (
+            db.query(User)
+            .filter(
+                User.role == UserRole.DOCTOR,
+                User.is_active == True,  # noqa: E712 — SQL comparison, not a Python bool test
+            )
+            .all()
+        )
+
+        candidates = [
+            DoctorCandidate(doc.id, doc.first_name or "", doc.last_name or "")
+            for doc in doctors
+            if (doc.first_name or doc.last_name)
+        ]
+        unnamed = [_doctor_label(doc) for doc in doctors if not (doc.first_name or doc.last_name)]
+
+        # Reported, not used for matching: a shared initial only defeats a card
+        # that writes nothing but that letter, which `_match_doctor` discovers
+        # per row. Knowing it up front is what lets one line explain a run.
+        grouped: dict[str, list[User]] = {}
         for doc in doctors:
             initial = (doc.first_name or "")[:1].upper()
-            if not initial or initial in ambiguous:
-                continue
-            if initial in by_initial:
-                del by_initial[initial]
-                ambiguous.add(initial)
-            else:
-                by_initial[initial] = doc.id
-        logger.info(
-            "Import: found %d doctors, %d unique initials",
-            len(doctors),
-            len(by_initial),
-        )
-        return DoctorIndex([doc.id for doc in doctors], by_initial)
+            if initial:
+                grouped.setdefault(initial, []).append(doc)
+        ambiguous_initials = {
+            i: [_doctor_label(d) for d in docs] for i, docs in grouped.items() if len(docs) > 1
+        }
+
+        return DoctorIndex([doc.id for doc in doctors], candidates, ambiguous_initials, unnamed)
     finally:
         db.close()
+
+
+def _log_doctor_index_health(
+    run_id: str, doctors: DoctorIndex, override_doctor_id: str | None
+) -> None:
+    """Say once per run what attribution will and will not be able to resolve.
+
+    `_import_workbook` already reports a card whose doctor could not be
+    identified, so a run against an unhelpful roster writes that symptom once
+    per *file* — around 8000 times during the migration this was written for,
+    every line saying the same thing. The cause is this single line, and it
+    used to be `info`: the quietest thing in the journal, sitting underneath its
+    own consequences.
+
+    What it reports is a *prediction*, not a verdict, because ambiguity now
+    depends on the cell. `_match_doctor` accepts any prefix of a name, so two
+    doctors sharing an initial only defeat a card that writes nothing but that
+    letter — `Mio` still resolves where `M` cannot. Naming them up front is what
+    lets one line explain a run's worth of flags.
+
+    Silent on an override run: `_resolve_doctor` returns the caller's id without
+    consulting any of this, so its health has no bearing on the outcome.
+    """
+    if override_doctor_id:
+        return
+
+    counts = f"{len(doctors.ids)} active doctor(s), {len(doctors.candidates)} matchable"
+    problems = []
+    if doctors.ambiguous_initials:
+        shared = ", ".join(
+            f"{initial} ({', '.join(names)})"
+            for initial, names in sorted(doctors.ambiguous_initials.items())
+        )
+        problems.append(f"sharing an initial: {shared}")
+    if doctors.unnamed:
+        problems.append(f"no name to match on: {', '.join(doctors.unnamed)}")
+
+    if not problems:
+        logger.info("Import[%s]: doctor index ready — %s", run_id, counts)
+        return
+
+    # Nothing carries a name, so no cell can match anything and every visit is
+    # attributed by fallback. Distinguished from the partial case because the
+    # remedy differs: this one cannot resolve a single row, however written.
+    if not doctors.candidates:
+        logger.warning(
+            "Import[%s]: doctor index unusable — %s; %s. No card can be matched to anybody, so "
+            "every visit is attributed by fallback and flagged import_incomplete.",
+            run_id,
+            counts,
+            "; ".join(problems),
+        )
+    else:
+        logger.warning(
+            "Import[%s]: doctor index degraded — %s; %s. A card naming only that letter cannot "
+            "be resolved to either of them and is flagged import_incomplete; a longer form such "
+            "as the full first name still resolves.",
+            run_id,
+            counts,
+            "; ".join(problems),
+        )
 
 
 class ResolvedDoctor(NamedTuple):
@@ -323,34 +585,39 @@ class ResolvedDoctor(NamedTuple):
 
 def _resolve_doctor(
     override_doctor_id: str | None,
-    doctor_initial: str | None,
+    doctor_label: str | None,
     doctors: DoctorIndex,
+    fallback_doctor_id: str | None,
 ) -> ResolvedDoctor:
-    """A caller-supplied doctor wins, then an initial match, then any doctor."""
+    """A caller-supplied doctor wins, then a name match, then the fallback.
+
+    The fallback replaces a `random.choice` over every doctor in the system.
+    Random attribution was wrong twice over: it invented a clinical fact, and it
+    was not even stable — re-importing the same card could attribute it to
+    somebody else. A fallback the caller nominated is still not a statement
+    about who did the work, but it is at least a decision somebody made, and it
+    is the same decision every time the card is read.
+
+    `fallback_doctor_id` is None only when `_import_workbook` is driven directly
+    with an empty index; the endpoint refuses such a run before it starts. The
+    caller then sees `id is None` and skips the row, as it always did.
+    """
     if override_doctor_id:
         return ResolvedDoctor(override_doctor_id, guessed=False)
 
-    # Nobody to attribute to. `_doctor_index_for_run` refuses an empty index
-    # before the run starts, and the run then carries that same index all the
-    # way through, so this is unreachable in practice — it exists so the type
-    # stays honest rather than as a live branch.
-    if not doctors.ids:
-        return ResolvedDoctor(None, guessed=False)
-
-    if doctor_initial:
-        matched = doctors.by_initial.get(doctor_initial.upper())
+    if doctor_label:
+        matched = _match_doctor(doctor_label, doctors.candidates)
         if matched:
             return ResolvedDoctor(matched, guessed=False)
-        # The card names somebody the index cannot identify: either no doctor
-        # has that initial, or two share it and `_load_doctor_index` dropped it
-        # rather than guess. Picking anyone here contradicts what the card says.
-        return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+        # The card names somebody no name begins with, or a prefix two doctors
+        # share. Either way it identifies nobody, and the fallback contradicts
+        # what the card says — so this one is flagged for a human.
+        return ResolvedDoctor(fallback_doctor_id, guessed=True)
 
-    # The row names nobody. A single doctor in the system is the only possible
-    # answer rather than a choice between candidates, so it is not a guess.
-    if len(doctors.ids) == 1:
-        return ResolvedDoctor(doctors.ids[0], guessed=False)
-    return ResolvedDoctor(random.choice(doctors.ids), guessed=True)
+    # The row names nobody, so nothing contradicts the fallback: the caller was
+    # asked who should own exactly these rows and answered. Not a guess, and not
+    # flagged — that is what keeps the review queue to the rows in real doubt.
+    return ResolvedDoctor(fallback_doctor_id, guessed=False)
 
 
 # The contact columns a later card may supply that an earlier one left empty.
@@ -449,7 +716,7 @@ class VisitRow(NamedTuple):
     visit_date: date
     diagnosis_notes: str | None
     treatment_notes: str | None
-    doctor_initial: str | None
+    doctor_label: str | None
     tooth_number: int | None
     price: Decimal | None
 
@@ -492,7 +759,7 @@ def _iter_visit_rows(rows: list) -> Iterator[VisitRow]:
             visit_date=current_date,
             diagnosis_notes=diagnosis_notes,
             treatment_notes=treatment_notes,
-            doctor_initial=cell_str(row[5]) if len(row) > 5 else None,
+            doctor_label=cell_str(row[5]) if len(row) > 5 else None,
             tooth_number=extract_tooth_number(diagnosis_notes),
             price=parse_price(row),
         )
@@ -504,13 +771,17 @@ def _import_workbook(
     content: bytes,
     doctors: DoctorIndex,
     override_doctor_id: str | None,
+    fallback_doctor_id: str | None,
     counts: dict,
     errors: list[str],
-) -> None:
+) -> FileLogDetail:
     """Import one card into `db`, updating `counts` and `errors` in place.
 
     Does not commit — the caller owns the transaction so that a file either
     lands whole or not at all.
+
+    Returns the log-only detail described on `FileLogDetail`; the counts the
+    caller reports to the browser keep travelling in `counts`.
     """
     wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
     try:
@@ -520,11 +791,11 @@ def _import_workbook(
 
     if len(rows) < MIN_ROWS:
         errors.append(f"{filename}: File too short, expected at least {MIN_ROWS} rows")
-        return
+        return FileLogDetail()
 
     header = _parse_patient_header(rows, filename, errors)
     if header is None:
-        return
+        return FileLogDetail()
 
     patient = (
         db.query(Patient)
@@ -576,11 +847,14 @@ def _import_workbook(
     # file says the same thing.
     rows_without_doctor = 0
     rows_with_guessed_doctor = 0
+    visits_missing_price = 0
     visit_rows_seen = 0
 
     for visit_row in _iter_visit_rows(rows):
         visit_rows_seen += 1
-        resolved = _resolve_doctor(override_doctor_id, visit_row.doctor_initial, doctors)
+        resolved = _resolve_doctor(
+            override_doctor_id, visit_row.doctor_label, doctors, fallback_doctor_id
+        )
         if not resolved.id:
             rows_without_doctor += 1
             continue
@@ -615,11 +889,17 @@ def _import_workbook(
                 price=visit_row.price,
                 paid=True,
                 import_incomplete=incomplete,
+                # Kept whatever the outcome, including a clean match: the column
+                # then means one thing — what the chart said — and a match that
+                # was wrong stays detectable instead of being invisible.
+                imported_doctor_label=visit_row.doctor_label,
             )
         )
         counts["visits_created"] += 1
         if incomplete:
             counts["visits_incomplete"] += 1
+        if visit_row.price is None:
+            visits_missing_price += 1
         if resolved.guessed:
             rows_with_guessed_doctor += 1
 
@@ -639,32 +919,58 @@ def _import_workbook(
     if rows_with_guessed_doctor:
         errors.append(
             f"{filename}: Could not identify the doctor for {rows_with_guessed_doctor} "
-            "visit row(s); assigned an arbitrary one and flagged them for review"
+            "visit row(s); assigned the fallback doctor and flagged them for review"
         )
 
+    return FileLogDetail(visits_missing_price=visits_missing_price)
 
-def _validate_override_doctor(doctor_id: str | None) -> str | None:
-    """Check a caller-supplied doctor_id before the response starts streaming.
 
-    Once the StreamingResponse begins, the status code is already sent — so a
-    bad id has to be rejected here to surface as a real HTTP 400.
+# Who a caller may name to receive visits. DOCTOR is the obvious one; ADMIN is
+# here because the clinic's administrator also practises, and `User.role` holds
+# a single value, so the alternative was a second account for one person.
+# Matching never targets an admin — cards name doctors — but an explicit choice
+# may.
+ATTRIBUTABLE_ROLES = (UserRole.DOCTOR, UserRole.ADMIN)
+
+
+def _validate_attributable(user_id: str | None, field: str) -> str | None:
+    """Check a caller-named doctor before the response starts streaming.
+
+    Once the StreamingResponse begins the status code is already sent, so a bad
+    id has to be rejected here to surface as a real HTTP 400 rather than as an
+    error buried in an event the frontend shows in a list.
+
+    Inactive users are refused. They are excluded from matching and from the
+    fallback pool, and an explicit id that quietly escaped that rule would make
+    "deactivated" mean nothing — `DELETE /api/users/{id}` is a soft delete, so
+    this is the same check that stops a deleted account being handed new work.
     """
-    if not doctor_id:
+    if not user_id:
         return None
     db = SessionLocal()
     try:
-        doctor = db.query(User).filter(User.id == doctor_id, User.role == UserRole.DOCTOR).first()
-        if not doctor:
+        user = (
+            db.query(User)
+            .filter(
+                User.id == user_id,
+                User.role.in_(ATTRIBUTABLE_ROLES),
+                User.is_active == True,  # noqa: E712 — SQL comparison, not a Python bool test
+            )
+            .first()
+        )
+        if not user:
             raise HTTPException(
                 status_code=400,
-                detail=f"Doctor with id {doctor_id} not found",
+                detail=f"{field}: no active doctor with id {user_id} found",
             )
-        return doctor.id
+        return user.id
     finally:
         db.close()
 
 
-def _doctor_index_for_run(override_doctor_id: str | None) -> DoctorIndex:
+def _doctor_index_for_run(
+    run_id: str, override_doctor_id: str | None, fallback_doctor_id: str | None
+) -> tuple[DoctorIndex, str | None]:
     """Load the index the whole run will use, refusing the run if it is unusable.
 
     `visits.doctor_id` is NOT NULL, so with an empty `DoctorIndex` every visit
@@ -689,21 +995,44 @@ def _doctor_index_for_run(override_doctor_id: str | None) -> DoctorIndex:
     visit it reads.
     """
     doctors = _load_doctor_index()
-    if not override_doctor_id and not doctors.ids:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No doctors in the system. Create a user with the DOCTOR role, "
-                "or pass doctor_id, before importing."
-            ),
-        )
-    return doctors
+    fallback = None
+
+    if not override_doctor_id:
+        if not doctors.ids:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No active doctors in the system. Create a user with the DOCTOR role, "
+                    "or pass doctor_id, before importing."
+                ),
+            )
+
+        # A run must know who owns the rows it cannot attribute, before it
+        # writes any of them. One active doctor is the only possible answer
+        # rather than a choice, so it does not need asking for; more than one
+        # does, and guessing is what this whole change exists to stop.
+        fallback = fallback_doctor_id or (doctors.ids[0] if len(doctors.ids) == 1 else None)
+        if not fallback:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Several doctors exist, so visits whose doctor cannot be identified "
+                    "have no owner. Pass fallback_doctor_id to say who should receive them, "
+                    "or doctor_id to attribute the whole import to one doctor."
+                ),
+            )
+
+    # After the rejections, so a run that never starts does not also file a
+    # complaint about an index it was never going to use.
+    _log_doctor_index_health(run_id, doctors, override_doctor_id)
+    return doctors, fallback
 
 
 @router.post("/xlsx")
 async def import_xlsx_files(
     files: list[UploadFile] = File(...),
     doctor_id: str | None = Form(None),
+    fallback_doctor_id: str | None = Form(None),
     # Named `_` like every other router: the value is never read, but the
     # dependency is what makes this endpoint admin-only. Deleting it because a
     # linter calls the argument unused would open patient-data import to every
@@ -728,14 +1057,29 @@ async def import_xlsx_files(
     is many requests, so the slot is claimed and released per batch, not for the
     run as a whole.
 
-    If `doctor_id` is provided, that doctor is assigned to every imported visit,
-    overriding per-row initial matching and the random fallback. If omitted, the
-    original behaviour applies (match by first-name initial, fall back to random)
-    and the system must contain at least one DOCTOR user — otherwise the request
-    is rejected with a 400 rather than importing patients whose visits would all
-    be dropped for want of anyone to attribute them to. A visit that falls back
-    to an arbitrary doctor is flagged `import_incomplete` and counted in the
-    summary's errors, so a fabricated attribution never reads as fact.
+    Two form fields decide attribution, and they are alternatives:
+
+    - `doctor_id` assigns that one doctor to every imported visit, skipping the
+      cards entirely. Nothing is flagged, because the caller has said who it was.
+    - `fallback_doctor_id` keeps per-card matching and says only who receives
+      the rows that matching cannot identify.
+
+    With neither, the run needs at least one active doctor, and — if more than
+    one exists — a `fallback_doctor_id`, or it is rejected with a 400 before the
+    stream opens. A single active doctor is the only possible answer rather than
+    a choice, so it is used without being asked for.
+
+    Matching reads the card's "Dr" cell as a name: the normalized text must be a
+    prefix of exactly one active doctor's first or last name, so `Miodrag` and
+    `Mio` identify him while `M` fits him and Milena both and therefore
+    identifies nobody. Whatever the cell said is stored verbatim on the visit as
+    `imported_doctor_label`, on every row, so a flagged visit can be resolved
+    later rather than only dismissed.
+
+    A row the card *named* but matching could not identify goes to the fallback
+    and is flagged `import_incomplete`, because the fallback contradicts what the
+    card says. A row naming nobody is not flagged: nothing contradicts the
+    fallback, and the caller was asked who should own exactly those rows.
 
     Streams three event types:
     - progress: emitted before each file starts processing
@@ -758,8 +1102,16 @@ async def import_xlsx_files(
     `MAX_IMPORT_FILES` above is a backstop against a non-browser caller, not a
     supported request size.
     """
-    override_doctor_id = _validate_override_doctor(doctor_id)
-    doctors = _doctor_index_for_run(override_doctor_id)
+    # One token per request, prefixed on every line this request writes. The
+    # frontend sends 50 files per batch, so a migration is ~160 requests whose
+    # per-file lines all say "file 12/50" — identical strings that only their
+    # timestamps separate. This makes one batch greppable, and it is per request
+    # rather than per run because the server never learns that batches belong
+    # together; giving a run one id means the client sending it.
+    run_id = uuid.uuid4().hex[:6]
+    override_doctor_id = _validate_attributable(doctor_id, "doctor_id")
+    run_fallback_id = _validate_attributable(fallback_doctor_id, "fallback_doctor_id")
+    doctors, run_fallback_id = _doctor_index_for_run(run_id, override_doctor_id, run_fallback_id)
 
     # Claimed after validation, so a rejected request never occupies the slot,
     # and before the file reads, so a second import cannot buffer its copy of
@@ -804,7 +1156,7 @@ async def import_xlsx_files(
 
         try:
             total = len(file_data)
-            logger.info("Import: starting, %d file(s)", total)
+            logger.info("Import[%s]: starting, %d file(s)", run_id, total)
 
             for i, (filename, content) in enumerate(file_data):
                 # Proof of life for the slot's staleness check.
@@ -827,13 +1179,15 @@ async def import_xlsx_files(
                 # One session and one transaction per file, so a bad file
                 # cannot roll back the ones already imported.
                 db = SessionLocal()
+                log_detail = FileLogDetail()
                 try:
-                    _import_workbook(
+                    log_detail = _import_workbook(
                         db,
                         filename,
                         content,
                         doctors,
                         override_doctor_id,
+                        run_fallback_id,
                         file_counts,
                         file_errors,
                     )
@@ -843,6 +1197,7 @@ async def import_xlsx_files(
                     db.rollback()
                     file_errors.append(f"{filename}: {str(e)}")
                     file_counts = _empty_counts()  # nothing was persisted
+                    log_detail = FileLogDetail()  # nor is there anything to explain
                 finally:
                     db.close()
 
@@ -852,6 +1207,10 @@ async def import_xlsx_files(
                 summary["errors"].extend(file_errors)
                 summary["files_processed"] += 1
                 run_state["files_done"] = summary["files_processed"]
+
+                _log_file_result(
+                    run_id, filename, i + 1, total, committed, file_counts, file_errors, log_detail
+                )
 
                 yield _sse(
                     {
@@ -865,12 +1224,26 @@ async def import_xlsx_files(
                 )
 
             run_state["reached_end"] = True
+            # The rollup the `complete` event carries, written down as well. A
+            # run's outcome is otherwise only reconstructable by re-reading
+            # every per-file line above.
+            logger.info(
+                "Import[%s]: run totals over %d file(s) — %s, flagged incomplete: %s, %d error(s)",
+                run_id,
+                summary["files_processed"],
+                _format_counts(summary),
+                _format_flagged(summary["patients_incomplete"], summary["visits_incomplete"])
+                or "none",
+                len(summary["errors"]),
+            )
             yield _sse({"type": "complete", "summary": summary})
 
         except Exception as e:
             # Previously this vanished into the summary's errors and was never
             # logged, so a run that died mid-way left the server silent.
-            logger.exception("Import: fatal error after %d file(s)", summary["files_processed"])
+            logger.exception(
+                "Import[%s]: fatal error after %d file(s)", run_id, summary["files_processed"]
+            )
             run_state["reached_end"] = True
             summary["errors"].append(f"Fatal error: {str(e)}")
             yield _sse({"type": "complete", "summary": summary})
@@ -899,10 +1272,11 @@ async def import_xlsx_files(
         """
         _IMPORT_SLOT.release(slot_token)
         if run_state["reached_end"]:
-            logger.info("Import: finished, %d file(s)", run_state["files_done"])
+            logger.info("Import[%s]: finished, %d file(s)", run_id, run_state["files_done"])
         else:
             logger.warning(
-                "Import: client disconnected after %d of %d file(s); the rest never started",
+                "Import[%s]: client disconnected after %d of %d file(s); the rest never started",
+                run_id,
                 run_state["files_done"],
                 len(file_data),
             )

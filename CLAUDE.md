@@ -127,7 +127,7 @@ resource. The `doctors` table was merged into `users` and dropped.
     first byte is written the `200` is committed and a status code can no longer
     be changed — an unknown `doctor_id` and the doctor check below both `400`
     there.
-  - **Requires at least one `DOCTOR` user unless `doctor_id` is passed.**
+  - **Requires at least one *active* `DOCTOR` user unless `doctor_id` is passed.**
     `visits.doctor_id` is `NOT NULL` and `_resolve_doctor` returns `None` only
     when no doctor exists at all, so an empty doctor table meant every visit row
     was dropped while the patient header around it committed normally — a
@@ -137,17 +137,49 @@ resource. The `doctors` table was merged into `users` and dropped.
     rejects the request with a `400` instead. Recovery is a re-import once a
     doctor exists: patients match on name plus date of birth and are found, not
     duplicated, and their empty visit histories fill in.
+  - **Attribution: two form fields, and they are alternatives.** `doctor_id`
+    assigns one doctor to every visit and skips the cards entirely — nothing is
+    flagged, the caller has said who it was. `fallback_doctor_id` keeps per-card
+    matching and names only the owner of the rows matching cannot identify.
+    With neither, a run needs at least one active doctor and — if more than one
+    exists — a fallback, or it is refused with a `400` before the stream opens.
+    One active doctor is the only possible answer rather than a choice, so it is
+    used without being asked for. Both fields accept `ADMIN` as well as
+    `DOCTOR`, because `User.role` holds a single value and the administrator
+    also practises; matching itself never selects an admin. Both refuse an
+    inactive user, or an explicit id would escape the rule below.
+  - **Matching reads the "Dr" cell as a name, not as an initial.** The
+    normalized text must be a prefix of exactly one active doctor's first *or*
+    last name, so `Miodrag` and `Mio` identify him while `Mi` and `M` fit
+    Milena too and therefore identify nobody. An initial is just a
+    one-character prefix, which is why there is one rule rather than two. This
+    replaced a dict keyed by single uppercase letters that the *whole cell* was
+    looked up in — so `M` matched and `M.`, ` m `, `Dr M` and `Miodrag` all
+    matched nothing, flagging cards that named their doctor perfectly clearly.
+    Normalization strips a leading `Dr`/`Dr.`, surrounding punctuation and
+    whitespace. Ambiguity is refused rather than guessed at: `visits.doctor_id`
+    is `NOT NULL`, so a pick would be a fabricated attribution reading as fact.
+  - **Inactive users are excluded from matching and from the fallback.**
+    `DELETE /api/users/{id}` is a soft delete, and the clinic does not create
+    accounts for doctors who have left — so a deactivated account is a disabled
+    or test one, and must not receive new clinical attribution.
   - **A visit whose doctor could not be identified is flagged, not invented.**
-    Attribution is by first-name initial; when that fails the row still gets an
-    arbitrary doctor, because `visits.doctor_id` is `NOT NULL`. That id is a
-    stand-in and must never read as fact, so the visit is marked
-    `import_incomplete` and reported in the summary. It counts as a guess when
-    the card names an initial nothing matches — no such doctor, or two share it
-    and `_load_doctor_index` dropped it rather than pick — and when the card
-    names nobody while several doctors exist. A single doctor in the system with
-    no initial on the row is the only possible answer, not a choice, so it is
-    not flagged; neither is an explicit `doctor_id`, where the caller has said
-    who it was.
+    The row still gets the fallback doctor, because `visits.doctor_id` is
+    `NOT NULL`. That id is a stand-in and must never read as fact, so the visit
+    is marked `import_incomplete` and reported. Only when the card *named*
+    somebody matching could not resolve: a row naming nobody is not flagged,
+    because nothing contradicts the fallback and the caller was asked who owns
+    exactly those rows. That distinction is what keeps the review queue to the
+    rows in real doubt rather than every row of a migration. The fallback
+    replaced a `random.choice` over every doctor, which invented a clinical fact
+    *and* was unstable — the same card could land on two different doctors.
+  - **`visits.imported_doctor_label` keeps what the card said, verbatim.**
+    Written on every visit, not only unresolved ones, so the column means one
+    thing and a *wrong* match stays detectable. Without it the letter the chart
+    was written with is discarded at parse time, and a flagged visit can only be
+    dismissed, never resolved. Read-only through the API: present on
+    `VisitResponse`, absent from `VisitBase`. Resolving a flag means correcting
+    `doctor_id`; rewriting the quote would destroy the evidence.
   - **Capped at `MAX_IMPORT_FILES` (5000) files per request.** Starlette's
     multipart parser defaults to 1000 and FastAPI calls `request.form()` with no
     arguments, so file 1001 used to be rejected with a JSON `400` raised *before*
@@ -243,6 +275,33 @@ resource. The `doctors` table was merged into `users` and dropped.
   - Duplicate visit rows *within a single card* are still imported twice. The
     session sets `autoflush=False`, so the duplicate check only ever saw rows
     already committed. Longstanding behaviour, left alone deliberately.
+  - **What a run writes to the journal.** Every line of one request is prefixed
+    `Import[<token>]`, the token being per *request* — the server never learns
+    that the frontend's ~160 batches belong to one migration, so a true run id
+    would have to come from the Angular app. Levels make `journalctl -p warning`
+    the review queue: a clean file is `info`, and anything wanting a human is a
+    `warning`. Three traps, each of which looks like tidying:
+    - **A card's filename is a patient's name**, and since the journald switch
+      these lines outlive deploys by months — outside the database, outside its
+      roles, and untouched by deleting that patient through the API. So the name
+      is written *only* for a file that **failed**: its transaction rolled back,
+      leaving this line as the sole evidence the file was read, and a position
+      cannot identify it afterwards. A flagged file logs `file N/M` instead,
+      because its records are in the database wearing `import_incomplete` and can
+      be listed from there. Error strings are prefix-stripped for the same
+      reason — every one is built as `f"{filename}: ..."`, so printing them raw
+      would put the name straight back on a line that just omitted it.
+    - **The doctor-index line's level tracks whether attribution can work.** An
+      index with no usable initials means every visit naming a doctor gets an
+      arbitrary one, so it warns and names the colliding doctors. It was `info`,
+      which put the one line explaining a whole bad run underneath the ~8000
+      per-file lines it caused. It stays silent when `doctor_id` was passed,
+      since `_resolve_doctor` never consults the index then.
+    - **Log-only facts travel on `FileLogDetail`, never in `counts`.** The counts
+      dict is spread into the `file_done` SSE event verbatim, so a counter added
+      there joins the contract the Angular app parses. `errors` is not a way
+      round it either: the frontend concatenates those across every batch and
+      shows them to whoever is importing.
 
 ## Planned — not implemented
 Documented here so nobody assumes these already work.
@@ -279,8 +338,9 @@ Documented here so nobody assumes these already work.
 - **This admin is the only user seeded — no doctor is created.** A fresh
   database therefore cannot import XLSX cards until somebody creates a `DOCTOR`
   user, which the import endpoint now enforces rather than discovering
-  mid-import. Doctor matching is by first-name initial, so the names have to
-  match the initials written in the cards.
+  mid-import. Doctor matching reads the card's "Dr" cell as a prefix of a
+  doctor's first or last name, so the roster's names have to correspond to what
+  the cards actually write.
 
 ## Environment Variables (.env)
 

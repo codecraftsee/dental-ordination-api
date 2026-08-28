@@ -6,6 +6,7 @@ payload keys, which is the contract that must survive the import refactor.
 """
 
 import json
+import logging
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -343,20 +344,24 @@ def test_an_ambiguous_initial_falls_back_and_flags_the_visit(client, admin_token
 
     The fallback still assigns somebody — `visits.doctor_id` is NOT NULL — but
     that id is a stand-in, not an identification, so the row is flagged for
-    review and reported rather than passing as fact.
+    review and reported rather than passing as fact. It is now the doctor the
+    caller nominated rather than a random pick, so the same card imported twice
+    lands on the same person.
     """
     from app.models.user import UserRole
 
     milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
-    marko = make_user(role=UserRole.DOCTOR, first_name="Marko")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
 
-    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1]["summary"]
+    summary = _events(
+        _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=milan.id)
+    )[-1]["summary"]
 
     assert summary["visits_incomplete"] == 1
     assert any("Could not identify the doctor" in e for e in summary["errors"])
 
     visits = client.get("/api/visits", headers=auth(admin_token)).json()
-    assert visits[0]["doctor_id"] in {milan.id, marko.id}
+    assert visits[0]["doctor_id"] == milan.id
     assert visits[0]["import_incomplete"] is True
 
 
@@ -387,22 +392,32 @@ def test_a_row_with_no_initial_and_one_doctor_is_not_a_guess(client, admin_token
     assert visits[0]["import_incomplete"] is False
 
 
-def test_a_row_with_no_initial_and_several_doctors_is_flagged(client, admin_token, make_user):
-    """Two candidates and nothing on the card to choose between them."""
+def test_a_row_naming_nobody_goes_to_the_fallback_unflagged(client, admin_token, make_user):
+    """Nothing on the card contradicts the fallback, so this is not in doubt.
+
+    It used to be flagged, back when the fallback was a random doctor and the
+    attribution really was invented. The caller is now asked who should own
+    exactly these rows and has answered, so flagging them would fill the review
+    queue with the one case nobody needs to review — which on a card that names
+    no doctors at all is every row it has.
+    """
     from app.models.user import UserRole
 
     milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
-    zoran = make_user(role=UserRole.DOCTOR, first_name="Zoran")
+    make_user(role=UserRole.DOCTOR, first_name="Zoran")
 
     row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", None, "4.000,00 din"]
-    summary = _events(_post(client, admin_token, _dental_card([row])))[-1]["summary"]
+    summary = _events(_post(client, admin_token, _dental_card([row]), fallback_doctor_id=milan.id))[
+        -1
+    ]["summary"]
 
-    assert summary["visits_incomplete"] == 1
-    assert any("Could not identify the doctor" in e for e in summary["errors"])
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 0
+    assert summary["errors"] == []
 
     visits = client.get("/api/visits", headers=auth(admin_token)).json()
-    assert visits[0]["doctor_id"] in {milan.id, zoran.id}
-    assert visits[0]["import_incomplete"] is True
+    assert visits[0]["doctor_id"] == milan.id
+    assert visits[0]["import_incomplete"] is False
 
 
 def test_an_explicit_doctor_id_is_never_a_guess(client, admin_token, make_user):
@@ -435,7 +450,7 @@ def test_import_with_no_doctors_in_the_system_is_rejected_before_streaming(clien
     resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
 
     assert resp.status_code == 400
-    assert "No doctors in the system" in resp.json()["detail"]
+    assert "No active doctors in the system" in resp.json()["detail"]
     assert client.get("/api/patients", headers=auth(admin_token)).json() == []
 
 
@@ -476,7 +491,8 @@ def test_rows_with_no_resolvable_doctor_collapse_to_one_error_per_file(client):
             db,
             "card.xlsx",
             _dental_card(three_rows),
-            DoctorIndex([], {}),
+            DoctorIndex(ids=[], candidates=[], ambiguous_initials={}, unnamed=[]),
+            None,
             None,
             _empty_counts(),
             errors,
@@ -533,7 +549,9 @@ def test_the_response_carries_a_background_slot_release(client, admin_token, doc
     from app.routers.import_xlsx import _IMPORT_SLOT, import_xlsx_files
 
     upload = UploadFile(file=BytesIO(_dental_card([VISIT_ROW])), filename="bg.xlsx")
-    resp = asyncio.run(import_xlsx_files(files=[upload], doctor_id=None, _=None))
+    resp = asyncio.run(
+        import_xlsx_files(files=[upload], doctor_id=None, fallback_doctor_id=None, _=None)
+    )
 
     assert resp.background is not None, "no BackgroundTask: a cancel would strand the slot"
 
@@ -602,4 +620,587 @@ def test_an_unknown_doctor_id_is_rejected_before_streaming(client, admin_token):
         doctor_id="00000000-0000-0000-0000-000000000000",
     )
     assert resp.status_code == 400
-    assert "not found" in resp.json()["detail"]
+    assert "no active doctor with id" in resp.json()["detail"]
+
+
+# --- The doctor-index health line ------------------------------------------
+#
+# The importer reports a card whose doctor could not be identified once per
+# file, so a run against a collided index repeats that symptom for every card it
+# reads. The cause — which initials collapsed, and who collapsed them — is one
+# line per run, and these pin it: its level tracks whether attribution can work
+# at all, because that is what decides whether somebody has to intervene.
+
+LOGGER_NAME = "app.routers.import_xlsx"
+
+
+def _index_log(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "doctor index" in r.getMessage()]
+
+
+def test_a_usable_doctor_index_is_logged_at_info(client, admin_token, doctor, caplog):
+    """One doctor, one matchable initial: nothing needs a human, so nothing warns."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "doctor index ready" in records[0].getMessage()
+    assert "1 active doctor(s), 1 matchable" in records[0].getMessage()
+
+
+def test_a_shared_initial_warns_and_names_the_doctors_sharing_it(
+    client, admin_token, make_user, caplog
+):
+    """Every initial shared is the case that flags a whole migration.
+
+    Two doctors, both 'M', so a card writing nothing but that letter resolves to
+    neither. The line has to carry the names: the remedy is a roster change, a
+    longer form on the card, or an explicit doctor_id, and none of those is
+    choosable without knowing who actually collided.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=milan.id)
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+
+    message = records[0].getMessage()
+    assert "doctor index degraded" in message
+    assert "2 active doctor(s), 2 matchable" in message
+    assert "M (Milan Tester, Marko Tester)" in message
+
+
+def test_a_partly_usable_index_warns_as_degraded(client, admin_token, make_user, caplog):
+    """Some initials still resolve, so the run is worth starting — but not silently."""
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+    make_user(role=UserRole.DOCTOR, first_name="Ana")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=milan.id)
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "doctor index degraded" in records[0].getMessage()
+    assert "3 active doctor(s), 3 matchable" in records[0].getMessage()
+
+
+def test_a_doctor_with_only_a_surname_is_still_matchable(
+    client, admin_token, doctor, make_user, caplog
+):
+    """Matching reads both names, so a missing first name is not a missing doctor."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="", last_name="Nameless")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=doctor.id)
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "2 active doctor(s), 2 matchable" in records[0].getMessage()
+
+
+def test_a_doctor_with_no_name_at_all_is_named_as_unmatchable(
+    client, admin_token, doctor, make_user, caplog
+):
+    """No name means no cell can ever select them, though they can still be a fallback."""
+    from app.models.user import UserRole
+
+    nameless = make_user(role=UserRole.DOCTOR, first_name="", last_name="")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=doctor.id)
+
+    records = _index_log(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    message = records[0].getMessage()
+    assert "2 active doctor(s), 1 matchable" in message
+    assert f"no name to match on: {nameless.id}" in message
+
+
+def test_an_explicit_doctor_id_silences_the_index_health_line(
+    client, admin_token, make_user, caplog
+):
+    """`_resolve_doctor` never consults the index here, so its health is not news."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    chosen = make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), doctor_id=chosen.id)
+
+    assert _index_log(caplog) == []
+
+
+def test_the_index_line_is_written_once_per_run_not_once_per_file(
+    client, admin_token, make_user, caplog
+):
+    """The point of the line: one cause against N symptoms.
+
+    Two cards for two different patients each report their unidentifiable
+    doctor, as they did before. The explanation is written once — which is why
+    it is worth reading at 8000 files, where the per-file lines are not.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        client.post(
+            "/api/import/xlsx",
+            files=[
+                ("files", ("a.xlsx", _dental_card([VISIT_ROW]), XLSX_MIME)),
+                ("files", ("b.xlsx", _dental_card([VISIT_ROW], first_name="Jelena"), XLSX_MIME)),
+            ],
+            data={"fallback_doctor_id": milan.id},
+            headers=auth(admin_token),
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("doctor index" in m for m in messages) == 1
+    assert sum("Could not identify the doctor" in m for m in messages) == 2
+
+
+# --- What the per-file line says a flag was for ----------------------------
+#
+# Every other cause of an `import_incomplete` flag appends an error string that
+# the per-file line prints. A missing price is the only one that does not, so it
+# is named explicitly; and patients and visits are reported apart, because one
+# flagged patient and twelve flagged visits are different problems.
+
+
+def _file_lines(caplog) -> list[str]:
+    """The per-file lines, which identify a card by position rather than by name."""
+    return [m for m in (r.getMessage() for r in caplog.records) if "]: file " in m]
+
+
+def test_a_price_flag_is_named_in_the_log(client, admin_token, doctor, caplog):
+    """Otherwise the line reports a count with no reason anywhere on it."""
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row]))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 visit(s), 1 of them for a missing price" in line
+
+
+def test_flagged_patients_and_visits_are_reported_apart(client, admin_token, doctor, caplog):
+    """A bad gender flags the patient; a missing price flags the visit."""
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row], gender="?"))
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 patient(s), 1 visit(s)" in line
+    # The patient's own reason already travels as an error string.
+    assert "Invalid gender" in line
+
+
+def test_a_visit_flagged_only_for_its_doctor_does_not_claim_a_price_problem(
+    client, admin_token, make_user, caplog
+):
+    """The price clause appears only when a price is actually missing."""
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=milan.id)
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete: 1 visit(s)" in line
+    assert "missing price" not in line
+    assert "Could not identify the doctor" in line
+
+
+def test_a_clean_file_still_logs_at_info_with_no_flag_clause(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    records = [r for r in caplog.records if "]: file " in r.getMessage()]
+    assert [r.levelno for r in records] == [logging.INFO]
+    assert "flagged" not in records[0].getMessage()
+
+
+def test_the_run_rollup_splits_flagged_records_by_kind(client, admin_token, doctor, caplog):
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row], gender="?"))
+
+    rollup = [m for m in (r.getMessage() for r in caplog.records) if "run totals" in m][0]
+    assert "flagged incomplete: 1 patient(s), 1 visit(s)" in rollup
+
+
+def test_the_run_rollup_says_none_when_nothing_was_flagged(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    rollup = [m for m in (r.getMessage() for r in caplog.records) if "run totals" in m][0]
+    assert "flagged incomplete: none" in rollup
+
+
+# --- Patient names in a journal that outlives the deploy --------------------
+#
+# A card is named after the patient, and since the container moved to the
+# journald driver these lines survive for months, outside the database and
+# untouched by deleting that patient through the API. So the name is written
+# only where nothing else records it: a failed file rolled back and left no row
+# behind, while a flagged file's records sit in the database wearing
+# `import_incomplete` and can be listed from there.
+
+
+def test_a_clean_file_is_logged_by_position_not_by_name(client, admin_token, doctor, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), filename="Marko Petrovic.xlsx")
+
+    line = _file_lines(caplog)[0]
+    assert "]: file 1/1 —" in line
+    assert "Marko" not in line
+
+
+def test_a_flagged_file_is_logged_by_position_not_by_name(client, admin_token, doctor, caplog):
+    row = ["01.03.2024.", None, "Caries d.24", None, "Extraction", "M", None]
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([row]), filename="Marko Petrovic.xlsx")
+
+    line = _file_lines(caplog)[0]
+    assert "flagged incomplete" in line
+    assert "Marko" not in line
+
+
+def test_an_error_string_does_not_smuggle_the_filename_back_in(client, admin_token, doctor, caplog):
+    """Every error is built as `f"{filename}: ..."`, so the prefix has to go too.
+
+    Without stripping it the line would omit the name from its own prefix and
+    then print it verbatim inside the first error — sanitising nothing.
+    """
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(
+            client,
+            admin_token,
+            _dental_card([VISIT_ROW], gender="?"),
+            filename="Marko Petrovic.xlsx",
+        )
+
+    line = _file_lines(caplog)[0]
+    assert "Invalid gender" in line, "the reason must survive the stripping"
+    assert "Marko Petrovic.xlsx" not in line
+
+
+def test_a_failed_file_keeps_its_name_because_nothing_else_has_it(
+    client, admin_token, doctor, caplog
+):
+    """The transaction rolled back, so this line is the only trace it was read."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, b"definitely not a workbook", filename="Marko Petrovic.xlsx")
+
+    failed = [r.getMessage() for r in caplog.records if "FAILED" in r.getMessage()]
+    assert len(failed) == 1
+    assert "Marko Petrovic.xlsx" in failed[0]
+    assert "file 1/1" in failed[0]
+
+
+# --- The per-request token --------------------------------------------------
+
+
+def _run_ids(caplog) -> list[str]:
+    ids = [
+        m.split("]", 1)[0][len("Import[") :]
+        for m in (r.getMessage() for r in caplog.records)
+        if m.startswith("Import[")
+    ]
+    return ids
+
+
+def test_every_line_of_one_request_carries_the_same_token(client, admin_token, doctor, caplog):
+    """Positions repeat across batches, so the token is what groups them."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        client.post(
+            "/api/import/xlsx",
+            files=[
+                ("files", ("a.xlsx", _dental_card([VISIT_ROW]), XLSX_MIME)),
+                ("files", ("b.xlsx", _dental_card([VISIT_ROW], first_name="Jelena"), XLSX_MIME)),
+            ],
+            headers=auth(admin_token),
+        )
+
+    ids = _run_ids(caplog)
+    # start, index health, two per-file lines, run totals, finished
+    assert len(ids) >= 6
+    assert len(set(ids)) == 1
+
+
+def test_two_requests_get_different_tokens(client, admin_token, doctor, caplog):
+    """A migration is ~160 requests; they have to be tellable apart."""
+    with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
+        _post(client, admin_token, _dental_card([VISIT_ROW]), filename="a.xlsx")
+        first = set(_run_ids(caplog))
+
+        _post(client, admin_token, _dental_card([VISIT_ROW], first_name="Jelena"), "b.xlsx")
+        both = set(_run_ids(caplog))
+
+    assert len(first) == 1
+    assert len(both) == 2
+
+
+# --- Matching the card's "Dr" cell to a doctor ------------------------------
+#
+# One rule: the normalized cell must be a prefix of exactly one active doctor's
+# first or last name. An initial is simply a one-character prefix, so the old
+# initial matching is a special case of this rather than a separate path.
+
+
+def _row(dr, date="01.03.2024.", note="Caries d.16"):
+    return [date, None, note, None, "Composite filling", dr, "4.000,00 din"]
+
+
+def _milena_and_miodrag(make_user):
+    from app.models.user import UserRole
+
+    return (
+        make_user(role=UserRole.DOCTOR, first_name="Milena", last_name="Mackic"),
+        make_user(role=UserRole.DOCTOR, first_name="Miodrag", last_name="Pavkovic"),
+    )
+
+
+def _only_visit(client, token):
+    return client.get("/api/visits", headers=auth(token)).json()[0]
+
+
+def test_a_full_first_name_resolves_what_an_initial_cannot(client, admin_token, make_user):
+    """Milena and Miodrag share M, but they differ from the second character on."""
+    milena, miodrag = _milena_and_miodrag(make_user)
+
+    # Nominating Milena as the fallback makes the assertion below mean
+    # something: the visit lands on Miodrag because the card *matched*, not
+    # because he happened to be picked.
+    _post(client, admin_token, _dental_card([_row("Miodrag")]), fallback_doctor_id=milena.id)
+
+    visit = _only_visit(client, admin_token)
+    assert visit["doctor_id"] == miodrag.id
+    assert visit["import_incomplete"] is False
+
+
+def test_an_unambiguous_prefix_resolves(client, admin_token, make_user):
+    milena, miodrag = _milena_and_miodrag(make_user)
+
+    _post(client, admin_token, _dental_card([_row("Mio")]), fallback_doctor_id=milena.id)
+
+    assert _only_visit(client, admin_token)["doctor_id"] == miodrag.id
+
+
+def test_a_prefix_two_doctors_share_resolves_to_nobody(client, admin_token, make_user):
+    """Refusing is the point: doctor_id is NOT NULL, so a pick would read as fact."""
+    milena, _ = _milena_and_miodrag(make_user)
+
+    summary = _events(
+        _post(client, admin_token, _dental_card([_row("Mi")]), fallback_doctor_id=milena.id)
+    )[-1]["summary"]
+
+    assert summary["visits_incomplete"] == 1
+    visit = _only_visit(client, admin_token)
+    assert visit["doctor_id"] == milena.id  # the fallback, deterministically
+    assert visit["import_incomplete"] is True
+
+
+def test_a_surname_resolves_too(client, admin_token, make_user):
+    """It is not yet established whether the cards write first names or surnames."""
+    milena, miodrag = _milena_and_miodrag(make_user)
+
+    _post(client, admin_token, _dental_card([_row("Pavkovic")]), fallback_doctor_id=milena.id)
+
+    assert _only_visit(client, admin_token)["doctor_id"] == miodrag.id
+
+
+def test_punctuation_and_an_honorific_do_not_defeat_a_match(client, admin_token, doctor):
+    """`M.` and `Dr M` used to match nothing: the raw cell was looked up in a
+    dict keyed by single uppercase letters, so a card that named its doctor
+    perfectly clearly still produced a flagged visit."""
+    for dr in ("M.", " m ", "Dr M", "dr. Milan"):
+        _post(client, admin_token, _dental_card([_row(dr, note=f"Caries {dr}")]))
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert len(visits) == 4
+    assert {v["doctor_id"] for v in visits} == {doctor.id}
+    assert not any(v["import_incomplete"] for v in visits)
+
+
+def test_an_inactive_doctor_is_neither_matched_nor_used_as_a_fallback(
+    client, admin_token, doctor, make_user
+):
+    """`is_active = False` is what DELETE /api/users/{id} sets.
+
+    The clinic does not create accounts for doctors who have left, so a
+    deactivated account is a disabled or test one and must not receive new
+    clinical attribution.
+    """
+    from app.models.user import UserRole
+
+    gone = make_user(role=UserRole.DOCTOR, first_name="Zoran", is_active=False)
+
+    summary = _events(_post(client, admin_token, _dental_card([_row("Zoran")])))[-1]["summary"]
+
+    visit = _only_visit(client, admin_token)
+    assert visit["doctor_id"] != gone.id
+    assert visit["doctor_id"] == doctor.id  # the only active doctor, by fallback
+    assert visit["import_incomplete"] is True
+    assert summary["visits_incomplete"] == 1
+
+
+def test_the_card_text_is_stored_even_on_a_clean_match(client, admin_token, doctor):
+    """Every visit, so the column means one thing and a wrong match stays visible."""
+    _post(client, admin_token, _dental_card([_row("Milan")]))
+
+    visit = _only_visit(client, admin_token)
+    assert visit["import_incomplete"] is False
+    assert visit["imported_doctor_label"] == "Milan"
+
+
+def test_the_card_text_is_stored_verbatim_when_it_resolves_to_nobody(
+    client, admin_token, make_user
+):
+    """The letter is the only true fact left in a fabricated attribution."""
+    milena, _ = _milena_and_miodrag(make_user)
+
+    _post(client, admin_token, _dental_card([_row("M")]), fallback_doctor_id=milena.id)
+
+    visit = _only_visit(client, admin_token)
+    assert visit["import_incomplete"] is True
+    assert visit["imported_doctor_label"] == "M"
+
+
+def test_a_row_naming_nobody_stores_no_label(client, admin_token, doctor):
+    _post(client, admin_token, _dental_card([_row(None)]))
+
+    assert _only_visit(client, admin_token)["imported_doctor_label"] is None
+
+
+# --- Who owns the rows a card cannot attribute ------------------------------
+#
+# The fallback replaced `random.choice` over every doctor. Random attribution
+# invented a clinical fact *and* was unstable — the same card could land on a
+# different doctor each import. A nominated fallback is still not a statement
+# about who did the work, but it is a decision somebody made, and the same one
+# every time.
+
+
+def test_several_doctors_and_no_fallback_is_refused_before_streaming(
+    client, admin_token, make_user
+):
+    """Refused as a real 400: once the stream opens the status is already sent."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Zoran")
+
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW]))
+
+    assert resp.status_code == 400
+    assert "fallback_doctor_id" in resp.json()["detail"]
+    assert client.get("/api/patients", headers=auth(admin_token)).json() == []
+
+
+def test_one_doctor_needs_no_fallback(client, admin_token, doctor):
+    """The only possible answer is not a choice, so it does not need asking for."""
+    row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", None, "4.000,00 din"]
+
+    summary = _events(_post(client, admin_token, _dental_card([row])))[-1]["summary"]
+
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 0
+    assert _only_visit(client, admin_token)["doctor_id"] == doctor.id
+
+
+def test_a_doctor_id_makes_the_fallback_unnecessary(client, admin_token, make_user):
+    """`_resolve_doctor` never consults the index, so there is nothing to fall back from."""
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Zoran")
+
+    summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW]), doctor_id=milan.id))[
+        -1
+    ]["summary"]
+
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 0
+
+
+def test_an_inactive_user_is_refused_as_a_fallback(client, admin_token, doctor, make_user):
+    """Otherwise an explicit id quietly escapes the rule that excludes them."""
+    from app.models.user import UserRole
+
+    gone = make_user(role=UserRole.DOCTOR, first_name="Zoran", is_active=False)
+
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=gone.id)
+
+    assert resp.status_code == 400
+    assert "fallback_doctor_id" in resp.json()["detail"]
+
+
+def test_an_inactive_user_is_refused_as_the_doctor_id_override(
+    client, admin_token, doctor, make_user
+):
+    from app.models.user import UserRole
+
+    gone = make_user(role=UserRole.DOCTOR, first_name="Zoran", is_active=False)
+
+    resp = _post(client, admin_token, _dental_card([VISIT_ROW]), doctor_id=gone.id)
+
+    assert resp.status_code == 400
+    assert "doctor_id" in resp.json()["detail"]
+
+
+def test_an_admin_may_be_nominated_as_the_fallback(client, admin_token, make_user):
+    """`User.role` holds one value, so the administrator who also practises
+    cannot be a DOCTOR as well. Nominating them explicitly is allowed; matching
+    still never selects them, because cards name doctors."""
+    from app.models.user import UserRole
+
+    make_user(role=UserRole.DOCTOR, first_name="Milena")
+    make_user(role=UserRole.DOCTOR, first_name="Miodrag")
+    boss = make_user(role=UserRole.ADMIN, first_name="Ana")
+
+    summary = _events(
+        _post(client, admin_token, _dental_card([_row("M")]), fallback_doctor_id=boss.id)
+    )[-1]["summary"]
+
+    assert summary["visits_incomplete"] == 1
+    visit = _only_visit(client, admin_token)
+    assert visit["doctor_id"] == boss.id
+    assert visit["imported_doctor_label"] == "M"
+
+
+def test_the_fallback_is_stable_across_files(client, admin_token, make_user):
+    """The failure the randomness caused: the same card, twice, two doctors."""
+    milena, _ = _milena_and_miodrag(make_user)
+
+    client.post(
+        "/api/import/xlsx",
+        files=[
+            ("files", ("a.xlsx", _dental_card([_row("M")]), XLSX_MIME)),
+            ("files", ("b.xlsx", _dental_card([_row("M")], first_name="Jelena"), XLSX_MIME)),
+        ],
+        data={"fallback_doctor_id": milena.id},
+        headers=auth(admin_token),
+    )
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert len(visits) == 2
+    assert {v["doctor_id"] for v in visits} == {milena.id}

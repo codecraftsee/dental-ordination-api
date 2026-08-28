@@ -60,5 +60,11 @@ class VisitResponse(VisitBase):
     created_at: datetime
     updated_at: datetime
     doctor: DoctorBrief | None = None
+    # Read-only on purpose: absent from VisitBase, so it is returned but can
+    # never be sent. This records what the source document claimed, and
+    # resolving a flagged visit means correcting `doctor_id` — editing the quote
+    # instead would destroy the only evidence of who was originally named.
+    # `None` for every visit created by hand, which has no document behind it.
+    imported_doctor_label: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
