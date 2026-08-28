@@ -275,6 +275,16 @@ def _empty_counts() -> dict:
         "visits_skipped": 0,
         "patients_incomplete": 0,
         "visits_incomplete": 0,
+        # The two causes behind `visits_incomplete`, reported apart because the
+        # sum cannot be acted on: a missing price is fixed on the visit, an
+        # unidentified doctor is fixed by correcting the attribution, and an
+        # operator seeing one number had no way to tell which they were looking
+        # at. `visits_unmatched_doctor` counts rows whose "Dr" cell named
+        # somebody matching could not resolve, whether or not they were flagged
+        # — with an authoritative fallback they are not, and the count is then
+        # the only record that the cards disagreed with the nomination.
+        "visits_missing_price": 0,
+        "visits_unmatched_doctor": 0,
     }
 
 
@@ -285,18 +295,6 @@ def _format_counts(counts: dict) -> str:
         f"({counts['patients_found']} matched, {counts['patients_updated']} filled), "
         f"visits +{counts['visits_created']} ({counts['visits_skipped']} skipped)"
     )
-
-
-class FileLogDetail(NamedTuple):
-    """Per-file facts that belong in the journal but not in the SSE payload.
-
-    `counts` is spread into the `file_done` event verbatim (`**file_counts`), so
-    a counter added there joins the contract the Angular app parses and the
-    characterization tests pin. A missing price is worth explaining in a log
-    line and is not worth a frontend change, so it travels here instead.
-    """
-
-    visits_missing_price: int = 0
 
 
 def _format_flagged(patients: int, visits: int, missing_price: int = 0) -> str:
@@ -340,7 +338,6 @@ def _log_file_result(
     committed: bool,
     counts: dict,
     errors: list[str],
-    log_detail: FileLogDetail,
 ) -> None:
     """Write one durable line per file.
 
@@ -379,20 +376,34 @@ def _log_file_result(
     flagged = _format_flagged(
         counts["patients_incomplete"],
         counts["visits_incomplete"],
-        log_detail.visits_missing_price,
+        counts["visits_missing_price"],
     )
-    if not flagged and not errors:
-        logger.info("Import[%s]: %s — %s", run_id, where, _format_counts(counts))
-        return
 
     # Only the clauses that apply, so the line says what is actually wrong
     # rather than trailing a "0 flagged incomplete" behind a parse complaint.
     detail = _format_counts(counts)
     if flagged:
         detail += f", flagged incomplete: {flagged}"
+
+    # Recorded whether or not those rows were flagged. With an authoritative
+    # fallback nothing marks them in the database and no error names them, so
+    # without this line the fact that the cards named somebody the roster could
+    # not resolve leaves no trace anywhere — which is the one thing worth
+    # keeping about a run that deliberately silences them.
+    unmatched = counts["visits_unmatched_doctor"]
+    if unmatched:
+        detail += f", {unmatched} visit(s) named an unresolvable doctor"
+
     if errors:
         detail += f"; {'; '.join(_strip_filename(errors, filename))}"
-    logger.warning("Import[%s]: %s — %s", run_id, where, detail)
+
+    # The level stays tied to whether a human is needed. An unmatched row the
+    # caller has already answered for is expected, not a problem, so it rides an
+    # info line and keeps `journalctl -p warning` the review queue it is.
+    if flagged or errors:
+        logger.warning("Import[%s]: %s — %s", run_id, where, detail)
+    else:
+        logger.info("Import[%s]: %s — %s", run_id, where, detail)
 
 
 class DoctorCandidate(NamedTuple):
@@ -558,7 +569,8 @@ def _log_doctor_index_health(
     if not doctors.candidates:
         logger.warning(
             "Import[%s]: doctor index unusable — %s; %s. No card can be matched to anybody, so "
-            "every visit is attributed by fallback and flagged import_incomplete.",
+            "every visit is attributed by fallback, counted in visits_unmatched_doctor and "
+            "otherwise unmarked.",
             run_id,
             counts,
             "; ".join(problems),
@@ -566,8 +578,8 @@ def _log_doctor_index_health(
     else:
         logger.warning(
             "Import[%s]: doctor index degraded — %s; %s. A card naming only that letter cannot "
-            "be resolved to either of them and is flagged import_incomplete; a longer form such "
-            "as the full first name still resolves.",
+            "be resolved to either of them and goes to the fallback; a longer form such as the "
+            "full first name still resolves.",
             run_id,
             counts,
             "; ".join(problems),
@@ -576,10 +588,10 @@ def _log_doctor_index_health(
 
 class ResolvedDoctor(NamedTuple):
     id: str | None
-    # Whether `id` identifies the doctor who actually did the work, or is only
-    # a stand-in that satisfies `visits.doctor_id`'s NOT NULL. A guessed id is
-    # fabricated clinical attribution, so the visit carrying it is flagged
-    # `import_incomplete` and reported — it must not read as fact.
+    # Whether `id` came from the card or from the caller's nominated fallback.
+    # No longer flags the visit — the caller answered for these rows — but it is
+    # counted in `visits_unmatched_doctor`, which with no flag and no error is
+    # the only signal that the card named somebody the roster could not resolve.
     guessed: bool
 
 
@@ -610,8 +622,9 @@ def _resolve_doctor(
         if matched:
             return ResolvedDoctor(matched, guessed=False)
         # The card names somebody no name begins with, or a prefix two doctors
-        # share. Either way it identifies nobody, and the fallback contradicts
-        # what the card says — so this one is flagged for a human.
+        # share. Either way it identifies nobody, so the row goes to the
+        # fallback the caller nominated for exactly this case. Counted, not
+        # flagged.
         return ResolvedDoctor(fallback_doctor_id, guessed=True)
 
     # The row names nobody, so nothing contradicts the fallback: the caller was
@@ -774,14 +787,11 @@ def _import_workbook(
     fallback_doctor_id: str | None,
     counts: dict,
     errors: list[str],
-) -> FileLogDetail:
+) -> None:
     """Import one card into `db`, updating `counts` and `errors` in place.
 
     Does not commit — the caller owns the transaction so that a file either
     lands whole or not at all.
-
-    Returns the log-only detail described on `FileLogDetail`; the counts the
-    caller reports to the browser keep travelling in `counts`.
     """
     wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
     try:
@@ -791,11 +801,11 @@ def _import_workbook(
 
     if len(rows) < MIN_ROWS:
         errors.append(f"{filename}: File too short, expected at least {MIN_ROWS} rows")
-        return FileLogDetail()
+        return
 
     header = _parse_patient_header(rows, filename, errors)
     if header is None:
-        return FileLogDetail()
+        return
 
     patient = (
         db.query(Patient)
@@ -846,8 +856,6 @@ def _import_workbook(
     # concatenated across every batch of a run by the frontend. One line per
     # file says the same thing.
     rows_without_doctor = 0
-    rows_with_guessed_doctor = 0
-    visits_missing_price = 0
     visit_rows_seen = 0
 
     for visit_row in _iter_visit_rows(rows):
@@ -872,11 +880,18 @@ def _import_workbook(
             counts["visits_skipped"] += 1
             continue
 
-        # One flag, two causes: a missing price and an unidentified doctor both
-        # mean "a human needs to look at this row". `import_incomplete` is
-        # already what the UI's warning and PATCH .../dismiss-warning act on, so
-        # a guessed doctor rides the same path rather than inventing a second.
-        incomplete = visit_row.price is None or resolved.guessed
+        # A missing price is the only thing that flags a visit. An unidentified
+        # doctor used to as well, on the reasoning that the fallback id is a
+        # stand-in and must not read as fact — but the caller nominates that
+        # fallback explicitly, which is them answering for exactly these rows.
+        # Flagging them anyway marked most of a migration written with initials
+        # for review, so the queue held everything and meant nothing.
+        #
+        # The evidence survives without the flag: `imported_doctor_label` keeps
+        # what the card said on every visit, and `visits_unmatched_doctor` counts
+        # the rows, so a wrong attribution is still findable.
+        unmatched_doctor = resolved.guessed
+        incomplete = visit_row.price is None
 
         db.add(
             Visit(
@@ -899,9 +914,9 @@ def _import_workbook(
         if incomplete:
             counts["visits_incomplete"] += 1
         if visit_row.price is None:
-            visits_missing_price += 1
-        if resolved.guessed:
-            rows_with_guessed_doctor += 1
+            counts["visits_missing_price"] += 1
+        if unmatched_doctor:
+            counts["visits_unmatched_doctor"] += 1
 
     # A card whose visit table is not where the parser expects it produces a
     # patient and nothing else, and used to report clean success — the one
@@ -916,13 +931,12 @@ def _import_workbook(
         errors.append(
             f"{filename}: No doctors in system, skipped {rows_without_doctor} visit row(s)"
         )
-    if rows_with_guessed_doctor:
-        errors.append(
-            f"{filename}: Could not identify the doctor for {rows_with_guessed_doctor} "
-            "visit row(s); assigned the fallback doctor and flagged them for review"
-        )
-
-    return FileLogDetail(visits_missing_price=visits_missing_price)
+    # No error for an unresolved doctor. Nothing is flagged any more, so
+    # "flagged them for review" would be false — and the frontend's
+    # `classifyFileOutcome` reports any file with a non-empty `errors` as
+    # incomplete, so a line here would keep the whole migration looking failed
+    # whatever the flag says. The count travels in `visits_unmatched_doctor` and
+    # in the journal instead, which is where a reviewer can act on it.
 
 
 # Who a caller may name to receive visits. DOCTOR is the obvious one; ADMIN is
@@ -1076,10 +1090,17 @@ async def import_xlsx_files(
     `imported_doctor_label`, on every row, so a flagged visit can be resolved
     later rather than only dismissed.
 
-    A row the card *named* but matching could not identify goes to the fallback
-    and is flagged `import_incomplete`, because the fallback contradicts what the
-    card says. A row naming nobody is not flagged: nothing contradicts the
-    fallback, and the caller was asked who should own exactly those rows.
+    A row the card named but matching could not identify goes to the fallback and
+    is **not** flagged. The caller nominated that fallback for exactly these
+    rows, so the id is an answer rather than a stand-in. It is still counted in
+    `visits_unmatched_doctor` and still carries `imported_doctor_label`, so a
+    wrong attribution stays findable — but nothing in the database marks it, and
+    no error names it. That is deliberate: flagging them put most of a migration
+    written with initials into a review queue nobody could work through, and the
+    frontend reports any file with a non-empty `errors` as incomplete.
+
+    A missing price is therefore the only thing that flags a visit, and
+    `visits_missing_price` reports it beside `visits_incomplete`.
 
     Streams three event types:
     - progress: emitted before each file starts processing
@@ -1179,9 +1200,8 @@ async def import_xlsx_files(
                 # One session and one transaction per file, so a bad file
                 # cannot roll back the ones already imported.
                 db = SessionLocal()
-                log_detail = FileLogDetail()
                 try:
-                    log_detail = _import_workbook(
+                    _import_workbook(
                         db,
                         filename,
                         content,
@@ -1196,8 +1216,9 @@ async def import_xlsx_files(
                 except Exception as e:
                     db.rollback()
                     file_errors.append(f"{filename}: {str(e)}")
-                    file_counts = _empty_counts()  # nothing was persisted
-                    log_detail = FileLogDetail()  # nor is there anything to explain
+                    # Nothing was persisted, and that includes the log-only
+                    # counters, which now travel in this same dict.
+                    file_counts = _empty_counts()
                 finally:
                     db.close()
 
@@ -1209,7 +1230,7 @@ async def import_xlsx_files(
                 run_state["files_done"] = summary["files_processed"]
 
                 _log_file_result(
-                    run_id, filename, i + 1, total, committed, file_counts, file_errors, log_detail
+                    run_id, filename, i + 1, total, committed, file_counts, file_errors
                 )
 
                 yield _sse(
@@ -1228,12 +1249,18 @@ async def import_xlsx_files(
             # run's outcome is otherwise only reconstructable by re-reading
             # every per-file line above.
             logger.info(
-                "Import[%s]: run totals over %d file(s) — %s, flagged incomplete: %s, %d error(s)",
+                "Import[%s]: run totals over %d file(s) — %s, flagged incomplete: %s, "
+                "%d visit(s) named an unresolvable doctor, %d error(s)",
                 run_id,
                 summary["files_processed"],
                 _format_counts(summary),
-                _format_flagged(summary["patients_incomplete"], summary["visits_incomplete"])
+                _format_flagged(
+                    summary["patients_incomplete"],
+                    summary["visits_incomplete"],
+                    summary["visits_missing_price"],
+                )
                 or "none",
+                summary["visits_unmatched_doctor"],
                 len(summary["errors"]),
             )
             yield _sse({"type": "complete", "summary": summary})

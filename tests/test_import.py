@@ -339,14 +339,16 @@ def test_rows_before_the_first_date_are_skipped(client, admin_token, doctor):
     assert visits[0]["date"] == "2024-04-05"
 
 
-def test_an_ambiguous_initial_falls_back_and_flags_the_visit(client, admin_token, make_user):
+def test_an_ambiguous_initial_falls_back_without_flagging_the_visit(client, admin_token, make_user):
     """Two doctors share the initial 'M', so it must not resolve to either by name.
 
-    The fallback still assigns somebody — `visits.doctor_id` is NOT NULL — but
-    that id is a stand-in, not an identification, so the row is flagged for
-    review and reported rather than passing as fact. It is now the doctor the
-    caller nominated rather than a random pick, so the same card imported twice
-    lands on the same person.
+    The row goes to the fallback and imports clean. It used to be flagged and
+    reported, on the reasoning that the id is a stand-in rather than an
+    identification — but the caller nominates that fallback for exactly these
+    rows, so it is an answer. Flagging them anyway put nearly every row of a
+    migration written with initials into the review queue, and the frontend
+    reports any file carrying an error as incomplete, so a real import came back
+    looking like it had failed.
     """
     from app.models.user import UserRole
 
@@ -357,12 +359,85 @@ def test_an_ambiguous_initial_falls_back_and_flags_the_visit(client, admin_token
         _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=milan.id)
     )[-1]["summary"]
 
-    assert summary["visits_incomplete"] == 1
-    assert any("Could not identify the doctor" in e for e in summary["errors"])
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 0
+    # No error either, or `classifyFileOutcome` in the Angular app reports the
+    # file as incomplete however the flag is set.
+    assert summary["errors"] == []
 
     visits = client.get("/api/visits", headers=auth(admin_token)).json()
     assert visits[0]["doctor_id"] == milan.id
+    assert visits[0]["import_incomplete"] is False
+
+
+def test_an_unresolved_doctor_is_still_counted_and_recorded(client, admin_token, make_user):
+    """Dropping the flag must not drop the evidence.
+
+    With no flag and no error, `visits_unmatched_doctor` and
+    `imported_doctor_label` are the only things left saying the card named
+    somebody the roster could not resolve. Losing them too would make a wrong
+    attribution undetectable rather than merely unflagged.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    summary = _events(
+        _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=milan.id)
+    )[-1]["summary"]
+
+    assert summary["visits_unmatched_doctor"] == 1
+    assert summary["visits_incomplete"] == 0
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["imported_doctor_label"] == "M"
+
+
+def test_a_missing_price_still_flags_an_unresolved_row(client, admin_token, make_user):
+    """A missing price is now the only cause, and it is untouched by the above."""
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", "M", None]
+    summary = _events(_post(client, admin_token, _dental_card([row]), fallback_doctor_id=milan.id))[
+        -1
+    ]["summary"]
+
+    assert summary["visits_incomplete"] == 1
+    assert summary["visits_missing_price"] == 1
+    assert summary["visits_unmatched_doctor"] == 1
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
     assert visits[0]["import_incomplete"] is True
+
+
+def test_the_file_done_event_carries_both_cause_counters(client, admin_token, make_user):
+    """Both counters cross the SSE boundary, per file as well as in the summary.
+
+    `visits_incomplete` alone does not say which problem to go and fix, and
+    `visits_unmatched_doctor` is now the only report of an unresolved doctor at
+    all — nothing flags it and no error names it.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", "M", None]
+    file_done = [
+        e
+        for e in _events(
+            _post(client, admin_token, _dental_card([row]), fallback_doctor_id=milan.id)
+        )
+        if e["type"] == "file_done"
+    ][0]
+
+    assert file_done["visits_incomplete"] == 1
+    assert file_done["visits_missing_price"] == 1
+    assert file_done["visits_unmatched_doctor"] == 1
 
 
 def test_a_matched_initial_is_not_flagged(client, admin_token, doctor):
@@ -769,7 +844,9 @@ def test_the_index_line_is_written_once_per_run_not_once_per_file(
 
     messages = [r.getMessage() for r in caplog.records]
     assert sum("doctor index" in m for m in messages) == 1
-    assert sum("Could not identify the doctor" in m for m in messages) == 2
+    # Per-file lines only: the run-totals line carries the same phrase once more.
+    per_file = [m for m in messages if "]: file " in m]
+    assert sum("named an unresolvable doctor" in m for m in per_file) == 2
 
 
 # --- What the per-file line says a flag was for ----------------------------
@@ -809,10 +886,16 @@ def test_flagged_patients_and_visits_are_reported_apart(client, admin_token, doc
     assert "Invalid gender" in line
 
 
-def test_a_visit_flagged_only_for_its_doctor_does_not_claim_a_price_problem(
+def test_an_unresolved_doctor_is_journalled_without_flagging_the_file(
     client, admin_token, make_user, caplog
 ):
-    """The price clause appears only when a price is actually missing."""
+    """The journal is the only place an unresolved doctor is reported now.
+
+    Nothing flags the row and no error names it, so this line is what a reviewer
+    has. It stays at info, because the caller nominated the fallback for exactly
+    these rows — `journalctl -p warning` is the queue for things nobody has
+    answered for yet.
+    """
     from app.models.user import UserRole
 
     milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
@@ -821,10 +904,12 @@ def test_a_visit_flagged_only_for_its_doctor_does_not_claim_a_price_problem(
     with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
         _post(client, admin_token, _dental_card([VISIT_ROW]), fallback_doctor_id=milan.id)
 
-    line = _file_lines(caplog)[0]
-    assert "flagged incomplete: 1 visit(s)" in line
-    assert "missing price" not in line
-    assert "Could not identify the doctor" in line
+    records = [r for r in caplog.records if "]: file " in r.getMessage()]
+    assert [r.levelno for r in records] == [logging.INFO]
+
+    line = records[0].getMessage()
+    assert "1 visit(s) named an unresolvable doctor" in line
+    assert "flagged incomplete" not in line
 
 
 def test_a_clean_file_still_logs_at_info_with_no_flag_clause(client, admin_token, doctor, caplog):
@@ -1013,10 +1098,11 @@ def test_a_prefix_two_doctors_share_resolves_to_nobody(client, admin_token, make
         _post(client, admin_token, _dental_card([_row("Mi")]), fallback_doctor_id=milena.id)
     )[-1]["summary"]
 
-    assert summary["visits_incomplete"] == 1
+    assert summary["visits_unmatched_doctor"] == 1
+    assert summary["visits_incomplete"] == 0
     visit = _only_visit(client, admin_token)
     assert visit["doctor_id"] == milena.id  # the fallback, deterministically
-    assert visit["import_incomplete"] is True
+    assert visit["import_incomplete"] is False
 
 
 def test_a_surname_resolves_too(client, admin_token, make_user):
@@ -1059,8 +1145,10 @@ def test_an_inactive_doctor_is_neither_matched_nor_used_as_a_fallback(
     visit = _only_visit(client, admin_token)
     assert visit["doctor_id"] != gone.id
     assert visit["doctor_id"] == doctor.id  # the only active doctor, by fallback
-    assert visit["import_incomplete"] is True
-    assert summary["visits_incomplete"] == 1
+    # Counted, not flagged: the row is still recorded as one the card named and
+    # matching could not resolve, but it is no longer marked for review.
+    assert visit["import_incomplete"] is False
+    assert summary["visits_unmatched_doctor"] == 1
 
 
 def test_the_card_text_is_stored_even_on_a_clean_match(client, admin_token, doctor):
@@ -1075,13 +1163,17 @@ def test_the_card_text_is_stored_even_on_a_clean_match(client, admin_token, doct
 def test_the_card_text_is_stored_verbatim_when_it_resolves_to_nobody(
     client, admin_token, make_user
 ):
-    """The letter is the only true fact left in a fabricated attribution."""
+    """The letter is the only true fact left in an unresolved attribution.
+
+    It matters more now than when the row was flagged: with no flag and no error,
+    this column and `visits_unmatched_doctor` are the whole audit trail.
+    """
     milena, _ = _milena_and_miodrag(make_user)
 
     _post(client, admin_token, _dental_card([_row("M")]), fallback_doctor_id=milena.id)
 
     visit = _only_visit(client, admin_token)
-    assert visit["import_incomplete"] is True
+    assert visit["import_incomplete"] is False
     assert visit["imported_doctor_label"] == "M"
 
 
@@ -1181,7 +1273,7 @@ def test_an_admin_may_be_nominated_as_the_fallback(client, admin_token, make_use
         _post(client, admin_token, _dental_card([_row("M")]), fallback_doctor_id=boss.id)
     )[-1]["summary"]
 
-    assert summary["visits_incomplete"] == 1
+    assert summary["visits_unmatched_doctor"] == 1
     visit = _only_visit(client, admin_token)
     assert visit["doctor_id"] == boss.id
     assert visit["imported_doctor_label"] == "M"
