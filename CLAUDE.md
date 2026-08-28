@@ -137,7 +137,9 @@ resource. The `doctors` table was merged into `users` and dropped.
     rejects the request with a `400` instead. Recovery is a re-import once a
     doctor exists: patients match on name plus date of birth and are found, not
     duplicated, and their empty visit histories fill in.
-  - **Attribution: two form fields, and they are alternatives.** `doctor_id`
+  - **Attribution: two form fields, and they are alternatives** (a third,
+    `fallback_is_authoritative`, modifies the second rather than competing with
+    them). `doctor_id`
     assigns one doctor to every visit and skips the cards entirely — nothing is
     flagged, the caller has said who it was. `fallback_doctor_id` keeps per-card
     matching and names only the owner of the rows matching cannot identify.
@@ -148,6 +150,18 @@ resource. The `doctors` table was merged into `users` and dropped.
     `DOCTOR`, because `User.role` holds a single value and the administrator
     also practises; matching itself never selects an admin. Both refuse an
     inactive user, or an explicit id would escape the rule below.
+  - **`fallback_is_authoritative` (bool, default false) turns the flag off, and
+    nothing else.** It modifies `fallback_doctor_id`: the caller is saying the
+    fallback is the answer for the rows matching cannot identify, not a
+    placeholder for one. Matching still runs, the rows are still counted in
+    `visits_unmatched_doctor`, and `imported_doctor_label` still records what the
+    card said — only `import_incomplete` and the per-file error string are
+    suppressed. Without it, a migration whose cards use initials this roster
+    cannot resolve flags essentially every row, which is a review queue nobody
+    works through. Sending it alongside `doctor_id` is a harmless no-op; that
+    path never guesses. Note it does **not** silence a missing price, which is
+    the other half of `visits_incomplete` and the likeliest way this gets
+    misread as "still incomplete after I picked a fallback".
   - **Matching reads the "Dr" cell as a name, not as an initial.** The
     normalized text must be a prefix of exactly one active doctor's first *or*
     last name, so `Miodrag` and `Mio` identify him while `Mi` and `M` fit
@@ -173,6 +187,12 @@ resource. The `doctors` table was merged into `users` and dropped.
     rows in real doubt rather than every row of a migration. The fallback
     replaced a `random.choice` over every doctor, which invented a clinical fact
     *and* was unstable — the same card could land on two different doctors.
+    `fallback_is_authoritative` collapses the distinction on purpose: once the
+    caller says the fallback *is* the answer, an unresolved row is no longer in
+    doubt and is not flagged. The rows are still counted and still carry
+    `imported_doctor_label`, so the decision remains auditable — but nothing in
+    the database marks them, and that is the trade the flag was protecting
+    against. Only offer it where somebody can genuinely answer for the rows.
   - **`visits.imported_doctor_label` keeps what the card said, verbatim.**
     Written on every visit, not only unresolved ones, so the column means one
     thing and a *wrong* match stays detectable. Without it the letter the chart
@@ -297,11 +317,25 @@ resource. The `doctors` table was merged into `users` and dropped.
       which put the one line explaining a whole bad run underneath the ~8000
       per-file lines it caused. It stays silent when `doctor_id` was passed,
       since `_resolve_doctor` never consults the index then.
-    - **Log-only facts travel on `FileLogDetail`, never in `counts`.** The counts
-      dict is spread into the `file_done` SSE event verbatim, so a counter added
-      there joins the contract the Angular app parses. `errors` is not a way
-      round it either: the frontend concatenates those across every batch and
-      shows them to whoever is importing.
+    - **Anything in `counts` is API contract.** The counts dict is spread into
+      the `file_done` SSE event verbatim, so a counter added there joins what the
+      Angular app parses — add one deliberately or not at all. `errors` is not a
+      way round it either: the frontend concatenates those across every batch and
+      shows them to whoever is importing. There used to be a `FileLogDetail`
+      NamedTuple carrying `visits_missing_price` as a journal-only fact for
+      exactly this reason; it is gone, because that number turned out to be one
+      the operator needs. See the next bullet.
+    - **`visits_incomplete` is reported alongside its two causes.**
+      `visits_missing_price` and `visits_unmatched_doctor` are both in `counts`,
+      so the `file_done` event and the run summary say *why* a visit is flagged.
+      The sum alone could not be acted on — a missing price is fixed on the
+      visit, an unresolved doctor by correcting the attribution — and an operator
+      seeing one number reasonably read every incomplete visit as an attribution
+      failure. They are not disjoint: a row can be both, so they do not add up to
+      `visits_incomplete`. And with `fallback_is_authoritative` set,
+      `visits_unmatched_doctor` counts rows that were deliberately *not* flagged,
+      making it the only remaining record that the cards disagreed with the
+      nomination.
 
 ## Planned — not implemented
 Documented here so nobody assumes these already work.

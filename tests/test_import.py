@@ -365,6 +365,133 @@ def test_an_ambiguous_initial_falls_back_and_flags_the_visit(client, admin_token
     assert visits[0]["import_incomplete"] is True
 
 
+def test_an_authoritative_fallback_takes_the_ambiguous_row_without_flagging_it(
+    client, admin_token, make_user
+):
+    """The caller has answered for exactly these rows, so the id is not a stand-in.
+
+    Same card and same roster as the test above, which flags. The only
+    difference is that the caller said the fallback is the answer rather than a
+    placeholder — at which point the flag is telling them something they have
+    already decided, and on a migration that is every row of every ambiguous
+    card.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    summary = _events(
+        _post(
+            client,
+            admin_token,
+            _dental_card([VISIT_ROW]),
+            fallback_doctor_id=milan.id,
+            fallback_is_authoritative="true",
+        )
+    )[-1]["summary"]
+
+    assert summary["visits_created"] == 1
+    assert summary["visits_incomplete"] == 0
+    # Not an error either: these rows are the expected outcome of what was
+    # asked for, and `errors` is concatenated across every batch of a run and
+    # shown to whoever is importing.
+    assert summary["errors"] == []
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["doctor_id"] == milan.id
+    assert visits[0]["import_incomplete"] is False
+
+
+def test_an_authoritative_fallback_still_counts_and_records_the_unresolved_rows(
+    client, admin_token, make_user
+):
+    """Silencing the flag must not silence the evidence.
+
+    `visits_unmatched_doctor` and `imported_doctor_label` are what make the
+    nomination auditable afterwards: nothing in the database marks these rows,
+    so the count is the only thing that says the cards named somebody the
+    roster could not resolve.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    summary = _events(
+        _post(
+            client,
+            admin_token,
+            _dental_card([VISIT_ROW]),
+            fallback_doctor_id=milan.id,
+            fallback_is_authoritative="true",
+        )
+    )[-1]["summary"]
+
+    assert summary["visits_unmatched_doctor"] == 1
+    assert summary["visits_incomplete"] == 0
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["imported_doctor_label"] == "M"
+
+
+def test_an_authoritative_fallback_still_flags_a_missing_price(client, admin_token, make_user):
+    """The flag has two causes and this only switches off one of them.
+
+    Worth pinning because it is the likeliest way the change gets misread: a run
+    with an authoritative fallback still reports incomplete visits, and they are
+    price problems, not attribution ones.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", "M", None]
+    summary = _events(
+        _post(
+            client,
+            admin_token,
+            _dental_card([row]),
+            fallback_doctor_id=milan.id,
+            fallback_is_authoritative="true",
+        )
+    )[-1]["summary"]
+
+    assert summary["visits_incomplete"] == 1
+    assert summary["visits_missing_price"] == 1
+    assert summary["visits_unmatched_doctor"] == 1
+
+    visits = client.get("/api/visits", headers=auth(admin_token)).json()
+    assert visits[0]["import_incomplete"] is True
+
+
+def test_the_file_done_event_splits_the_two_incomplete_causes(client, admin_token, make_user):
+    """Both counters cross the SSE boundary, per file as well as in the summary.
+
+    `visits_incomplete` alone cannot be acted on — a missing price is fixed on
+    the visit and an unidentified doctor by correcting the attribution — and the
+    frontend previously had no way to tell which it was looking at.
+    """
+    from app.models.user import UserRole
+
+    milan = make_user(role=UserRole.DOCTOR, first_name="Milan")
+    make_user(role=UserRole.DOCTOR, first_name="Marko")
+
+    row = ["01.03.2024.", None, "Caries d.16", None, "Composite filling", "M", None]
+    file_done = [
+        e
+        for e in _events(
+            _post(client, admin_token, _dental_card([row]), fallback_doctor_id=milan.id)
+        )
+        if e["type"] == "file_done"
+    ][0]
+
+    assert file_done["visits_incomplete"] == 1
+    assert file_done["visits_missing_price"] == 1
+    assert file_done["visits_unmatched_doctor"] == 1
+
+
 def test_a_matched_initial_is_not_flagged(client, admin_token, doctor):
     """The 'M' in VISIT_ROW resolves to Milan, so nothing is guessed."""
     summary = _events(_post(client, admin_token, _dental_card([VISIT_ROW])))[-1]["summary"]
