@@ -45,6 +45,21 @@ class Visit(Base):
     price = Column(Numeric(10, 2), nullable=True)
     paid = Column(Boolean, default=True, nullable=False)
     import_incomplete = Column(Boolean, nullable=False, default=False)
+
+    # What the imported card's "Dr" cell actually said, kept verbatim.
+    #
+    # `doctor_id` is NOT NULL, so a card naming somebody the system cannot
+    # identify still has to be attributed to *a* user — and that attribution is
+    # a stand-in, which is what `import_incomplete` above marks. Without this
+    # column the one true fact in that record, the letter the chart was written
+    # with, is discarded at parse time: a flagged visit can then only be
+    # dismissed, never resolved, because nothing remembers who was claimed.
+    #
+    # Nullable because every visit that predates the import, and every visit
+    # created by hand in the UI, genuinely has no source document to quote.
+    # 100 matches `users.first_name`, so a card carrying a full name rather than
+    # a single initial still fits.
+    imported_doctor_label = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 

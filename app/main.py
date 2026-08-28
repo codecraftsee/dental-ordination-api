@@ -208,6 +208,23 @@ def run_startup_migrations():
                         sqlalchemy.text(f"ALTER TYPE userrole RENAME VALUE '{old}' TO '{new}'")
                     )
 
+    # What the imported card's "Dr" cell said, defined on app/models/visit.py.
+    # Same reason as the indexes below: create_all() skips a table that already
+    # exists, so the model definition only ever reaches a fresh database and a
+    # deployed schema needs the ALTER spelled out.
+    #
+    # Additive and nullable, so an older image that does not know the column
+    # ignores it rather than failing on it — which is what makes rolling the
+    # deploy back survivable even though the schema change itself is one-way.
+    if "visits" in insp.get_table_names():
+        if "imported_doctor_label" not in [c["name"] for c in insp.get_columns("visits")]:
+            with engine.begin() as conn:
+                conn.execute(
+                    sqlalchemy.text(
+                        "ALTER TABLE visits ADD COLUMN imported_doctor_label VARCHAR(100)"
+                    )
+                )
+
     # Indexes for the XLSX import hot path, defined on the models in
     # app/models/{visit,patient}.py. create_all() above skips any table that
     # already exists, indexes included, so the model definitions only ever

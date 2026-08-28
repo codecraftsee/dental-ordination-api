@@ -583,3 +583,55 @@ def test_admin_bulk_delete_clears_visits_only(client, admin_token, patient, doct
 
     assert client.get("/api/visits", headers=headers).json() == []
     assert len(client.get("/api/patients", headers=headers).json()) == 1
+
+
+def test_a_hand_created_visit_has_no_imported_doctor_label(client, admin_token, patient, doctor):
+    """The label quotes a source document, and a visit typed into the UI has none."""
+    headers = auth(admin_token)
+
+    created = client.post(
+        "/api/visits",
+        json={
+            "patient_id": patient["id"],
+            "doctor_id": doctor.id,
+            "date": "2024-03-01",
+            "diagnosis_notes": "Caries d.16",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["imported_doctor_label"] is None
+
+
+def test_the_imported_doctor_label_cannot_be_set_through_the_api(
+    client, admin_token, patient, doctor
+):
+    """Read-only by omission from VisitBase: returned, never accepted.
+
+    It records what the card claimed, so resolving a flagged visit has to mean
+    correcting `doctor_id`. Letting the quote itself be rewritten would destroy
+    the only evidence of who the document originally named.
+    """
+    headers = auth(admin_token)
+
+    created = client.post(
+        "/api/visits",
+        json={
+            "patient_id": patient["id"],
+            "doctor_id": doctor.id,
+            "date": "2024-03-01",
+            "imported_doctor_label": "M",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["imported_doctor_label"] is None
+
+    visit_id = created.json()["id"]
+    updated = client.put(
+        f"/api/visits/{visit_id}",
+        json={"imported_doctor_label": "Z"},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["imported_doctor_label"] is None
