@@ -569,7 +569,8 @@ def _log_doctor_index_health(
     if not doctors.candidates:
         logger.warning(
             "Import[%s]: doctor index unusable — %s; %s. No card can be matched to anybody, so "
-            "every visit is attributed by fallback and flagged import_incomplete.",
+            "every visit is attributed by fallback, counted in visits_unmatched_doctor and "
+            "otherwise unmarked.",
             run_id,
             counts,
             "; ".join(problems),
@@ -577,8 +578,8 @@ def _log_doctor_index_health(
     else:
         logger.warning(
             "Import[%s]: doctor index degraded — %s; %s. A card naming only that letter cannot "
-            "be resolved to either of them and is flagged import_incomplete; a longer form such "
-            "as the full first name still resolves.",
+            "be resolved to either of them and goes to the fallback; a longer form such as the "
+            "full first name still resolves.",
             run_id,
             counts,
             "; ".join(problems),
@@ -587,10 +588,10 @@ def _log_doctor_index_health(
 
 class ResolvedDoctor(NamedTuple):
     id: str | None
-    # Whether `id` identifies the doctor who actually did the work, or is only
-    # a stand-in that satisfies `visits.doctor_id`'s NOT NULL. A guessed id is
-    # fabricated clinical attribution, so the visit carrying it is flagged
-    # `import_incomplete` and reported — it must not read as fact.
+    # Whether `id` came from the card or from the caller's nominated fallback.
+    # No longer flags the visit — the caller answered for these rows — but it is
+    # counted in `visits_unmatched_doctor`, which with no flag and no error is
+    # the only signal that the card named somebody the roster could not resolve.
     guessed: bool
 
 
@@ -621,8 +622,9 @@ def _resolve_doctor(
         if matched:
             return ResolvedDoctor(matched, guessed=False)
         # The card names somebody no name begins with, or a prefix two doctors
-        # share. Either way it identifies nobody, and the fallback contradicts
-        # what the card says — so this one is flagged for a human.
+        # share. Either way it identifies nobody, so the row goes to the
+        # fallback the caller nominated for exactly this case. Counted, not
+        # flagged.
         return ResolvedDoctor(fallback_doctor_id, guessed=True)
 
     # The row names nobody, so nothing contradicts the fallback: the caller was
@@ -785,18 +787,11 @@ def _import_workbook(
     fallback_doctor_id: str | None,
     counts: dict,
     errors: list[str],
-    fallback_is_authoritative: bool = False,
 ) -> None:
     """Import one card into `db`, updating `counts` and `errors` in place.
 
     Does not commit — the caller owns the transaction so that a file either
     lands whole or not at all.
-
-    `fallback_is_authoritative` says the caller has accepted the fallback as the
-    answer for every row matching cannot identify, so those rows are not flagged.
-    It changes only whether the flag is written: matching still runs, the row is
-    still counted as unmatched, and `imported_doctor_label` still records what
-    the card said.
     """
     wb = load_workbook(filename=BytesIO(content), read_only=True, data_only=True)
     try:
@@ -885,18 +880,18 @@ def _import_workbook(
             counts["visits_skipped"] += 1
             continue
 
-        # One flag, two causes: a missing price and an unidentified doctor both
-        # mean "a human needs to look at this row". `import_incomplete` is
-        # already what the UI's warning and PATCH .../dismiss-warning act on, so
-        # a guessed doctor rides the same path rather than inventing a second.
+        # A missing price is the only thing that flags a visit. An unidentified
+        # doctor used to as well, on the reasoning that the fallback id is a
+        # stand-in and must not read as fact — but the caller nominates that
+        # fallback explicitly, which is them answering for exactly these rows.
+        # Flagging them anyway marked most of a migration written with initials
+        # for review, so the queue held everything and meant nothing.
         #
-        # Unless the caller nominated the fallback *and* said it is authoritative.
-        # The flag exists to stop a stand-in id reading as fact; when somebody has
-        # explicitly answered "these rows are Dr X's", it is no longer a stand-in
-        # and the flag is only noise on a migration. What the card said survives
-        # on `imported_doctor_label` either way, so the decision stays auditable.
+        # The evidence survives without the flag: `imported_doctor_label` keeps
+        # what the card said on every visit, and `visits_unmatched_doctor` counts
+        # the rows, so a wrong attribution is still findable.
         unmatched_doctor = resolved.guessed
-        incomplete = visit_row.price is None or (unmatched_doctor and not fallback_is_authoritative)
+        incomplete = visit_row.price is None
 
         db.add(
             Visit(
@@ -936,18 +931,12 @@ def _import_workbook(
         errors.append(
             f"{filename}: No doctors in system, skipped {rows_without_doctor} visit row(s)"
         )
-    # Silent when the caller called the fallback authoritative: nothing was
-    # flagged, so "flagged them for review" would be false, and the rows are the
-    # expected outcome of what they asked for rather than a problem. `errors` is
-    # concatenated across every batch of a run and shown to whoever is importing,
-    # so a line per file here would bury the errors that do need them. The count
-    # still travels in `visits_unmatched_doctor` and in the journal.
-    if counts["visits_unmatched_doctor"] and not fallback_is_authoritative:
-        errors.append(
-            f"{filename}: Could not identify the doctor for "
-            f"{counts['visits_unmatched_doctor']} visit row(s); assigned the fallback "
-            "doctor and flagged them for review"
-        )
+    # No error for an unresolved doctor. Nothing is flagged any more, so
+    # "flagged them for review" would be false — and the frontend's
+    # `classifyFileOutcome` reports any file with a non-empty `errors` as
+    # incomplete, so a line here would keep the whole migration looking failed
+    # whatever the flag says. The count travels in `visits_unmatched_doctor` and
+    # in the journal instead, which is where a reviewer can act on it.
 
 
 # Who a caller may name to receive visits. DOCTOR is the obvious one; ADMIN is
@@ -1058,7 +1047,6 @@ async def import_xlsx_files(
     files: list[UploadFile] = File(...),
     doctor_id: str | None = Form(None),
     fallback_doctor_id: str | None = Form(None),
-    fallback_is_authoritative: bool = Form(False),
     # Named `_` like every other router: the value is never read, but the
     # dependency is what makes this endpoint admin-only. Deleting it because a
     # linter calls the argument unused would open patient-data import to every
@@ -1102,24 +1090,17 @@ async def import_xlsx_files(
     `imported_doctor_label`, on every row, so a flagged visit can be resolved
     later rather than only dismissed.
 
-    A row the card *named* but matching could not identify goes to the fallback
-    and is flagged `import_incomplete`, because the fallback contradicts what the
-    card says. A row naming nobody is not flagged: nothing contradicts the
-    fallback, and the caller was asked who should own exactly those rows.
+    A row the card named but matching could not identify goes to the fallback and
+    is **not** flagged. The caller nominated that fallback for exactly these
+    rows, so the id is an answer rather than a stand-in. It is still counted in
+    `visits_unmatched_doctor` and still carries `imported_doctor_label`, so a
+    wrong attribution stays findable — but nothing in the database marks it, and
+    no error names it. That is deliberate: flagging them put most of a migration
+    written with initials into a review queue nobody could work through, and the
+    frontend reports any file with a non-empty `errors` as incomplete.
 
-    `fallback_is_authoritative` suppresses that flag. It says the caller has
-    accepted the fallback as the answer for those rows rather than as a
-    placeholder, which is the difference between a review queue holding the rows
-    in real doubt and one holding every row of a migration whose cards this
-    roster cannot resolve. It changes nothing else: matching still runs, the rows
-    are still counted in `visits_unmatched_doctor`, and `imported_doctor_label`
-    still records what the card said, so the nomination stays auditable. It does
-    not suppress a flag caused by a missing price.
-
-    `visits_incomplete` is reported with both of its causes beside it —
-    `visits_missing_price` and `visits_unmatched_doctor` — because the total on
-    its own does not say which problem to go and fix. A row can be both, so the
-    two do not sum to it.
+    A missing price is therefore the only thing that flags a visit, and
+    `visits_missing_price` reports it beside `visits_incomplete`.
 
     Streams three event types:
     - progress: emitted before each file starts processing
@@ -1149,13 +1130,6 @@ async def import_xlsx_files(
     # rather than per run because the server never learns that batches belong
     # together; giving a run one id means the client sending it.
     run_id = uuid.uuid4().hex[:6]
-
-    # `is True` rather than `bool(...)`: this function is also called directly by
-    # tests/test_import.py, which passes no value and so leaves the `Form(False)`
-    # descriptor in place — a truthy object that would silently turn the flagging
-    # off on that path. Only a real boolean True counts.
-    authoritative_fallback = fallback_is_authoritative is True
-
     override_doctor_id = _validate_attributable(doctor_id, "doctor_id")
     run_fallback_id = _validate_attributable(fallback_doctor_id, "fallback_doctor_id")
     doctors, run_fallback_id = _doctor_index_for_run(run_id, override_doctor_id, run_fallback_id)
@@ -1236,7 +1210,6 @@ async def import_xlsx_files(
                         run_fallback_id,
                         file_counts,
                         file_errors,
-                        authoritative_fallback,
                     )
                     db.commit()
                     committed = True

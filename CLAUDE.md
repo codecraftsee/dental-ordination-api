@@ -150,18 +150,9 @@ resource. The `doctors` table was merged into `users` and dropped.
     `DOCTOR`, because `User.role` holds a single value and the administrator
     also practises; matching itself never selects an admin. Both refuse an
     inactive user, or an explicit id would escape the rule below.
-  - **`fallback_is_authoritative` (bool, default false) turns the flag off, and
-    nothing else.** It modifies `fallback_doctor_id`: the caller is saying the
-    fallback is the answer for the rows matching cannot identify, not a
-    placeholder for one. Matching still runs, the rows are still counted in
-    `visits_unmatched_doctor`, and `imported_doctor_label` still records what the
-    card said — only `import_incomplete` and the per-file error string are
-    suppressed. Without it, a migration whose cards use initials this roster
-    cannot resolve flags essentially every row, which is a review queue nobody
-    works through. Sending it alongside `doctor_id` is a harmless no-op; that
-    path never guesses. Note it does **not** silence a missing price, which is
-    the other half of `visits_incomplete` and the likeliest way this gets
-    misread as "still incomplete after I picked a fallback".
+    A `fallback_is_authoritative` bool briefly existed to make the flagging below
+    opt-out; it was removed before merge in favour of never flagging at all. Do
+    not reintroduce it without reading the next-but-one bullet.
   - **Matching reads the "Dr" cell as a name, not as an initial.** The
     normalized text must be a prefix of exactly one active doctor's first *or*
     last name, so `Miodrag` and `Mio` identify him while `Mi` and `M` fit
@@ -177,22 +168,29 @@ resource. The `doctors` table was merged into `users` and dropped.
     `DELETE /api/users/{id}` is a soft delete, and the clinic does not create
     accounts for doctors who have left — so a deactivated account is a disabled
     or test one, and must not receive new clinical attribution.
-  - **A visit whose doctor could not be identified is flagged, not invented.**
-    The row still gets the fallback doctor, because `visits.doctor_id` is
-    `NOT NULL`. That id is a stand-in and must never read as fact, so the visit
-    is marked `import_incomplete` and reported. Only when the card *named*
-    somebody matching could not resolve: a row naming nobody is not flagged,
-    because nothing contradicts the fallback and the caller was asked who owns
-    exactly those rows. That distinction is what keeps the review queue to the
-    rows in real doubt rather than every row of a migration. The fallback
-    replaced a `random.choice` over every doctor, which invented a clinical fact
-    *and* was unstable — the same card could land on two different doctors.
-    `fallback_is_authoritative` collapses the distinction on purpose: once the
-    caller says the fallback *is* the answer, an unresolved row is no longer in
-    doubt and is not flagged. The rows are still counted and still carry
-    `imported_doctor_label`, so the decision remains auditable — but nothing in
-    the database marks them, and that is the trade the flag was protecting
-    against. Only offer it where somebody can genuinely answer for the rows.
+  - **A visit whose doctor could not be identified is counted, not flagged.**
+    The row gets the fallback doctor, because `visits.doctor_id` is `NOT NULL`,
+    and imports clean. It is counted in `visits_unmatched_doctor` and carries
+    `imported_doctor_label`; nothing else marks it and **no error names it**.
+    This is deliberate and was arrived at the hard way:
+    - It used to be flagged `import_incomplete` and reported as an error, the
+      reasoning being that a stand-in id must not read as fact. But the caller
+      *nominates* that fallback for exactly these rows, so it is an answer, not a
+      guess. On the real cards — written with initials this roster cannot
+      resolve — that flagged 3 to 12 rows in almost every file.
+    - The error string was the worse half. `classifyFileOutcome` in the Angular
+      app reports **any file with a non-empty `errors` as `incomplete`**,
+      independent of the counters, so a completely successful import came back
+      with every card labelled incomplete. Suppressing the flag alone does not
+      fix that; the error has to go too. Anything appended to `errors` for a
+      normal, expected outcome will resurface this.
+    - The fallback replaced a `random.choice` over every doctor, which invented a
+      clinical fact *and* was unstable — the same card could land on two
+      different doctors. That is the problem worth solving here; flagging was
+      not.
+    A missing price is now the only thing that flags a visit. Unreadable gender
+    or DOB still flags the *patient* and still appends an error, which is correct
+    — nothing has answered for those.
   - **`visits.imported_doctor_label` keeps what the card said, verbatim.**
     Written on every visit, not only unresolved ones, so the column means one
     thing and a *wrong* match stays detectable. Without it the letter the chart
@@ -325,17 +323,14 @@ resource. The `doctors` table was merged into `users` and dropped.
       NamedTuple carrying `visits_missing_price` as a journal-only fact for
       exactly this reason; it is gone, because that number turned out to be one
       the operator needs. See the next bullet.
-    - **`visits_incomplete` is reported alongside its two causes.**
-      `visits_missing_price` and `visits_unmatched_doctor` are both in `counts`,
-      so the `file_done` event and the run summary say *why* a visit is flagged.
-      The sum alone could not be acted on — a missing price is fixed on the
-      visit, an unresolved doctor by correcting the attribution — and an operator
-      seeing one number reasonably read every incomplete visit as an attribution
-      failure. They are not disjoint: a row can be both, so they do not add up to
-      `visits_incomplete`. And with `fallback_is_authoritative` set,
-      `visits_unmatched_doctor` counts rows that were deliberately *not* flagged,
-      making it the only remaining record that the cards disagreed with the
-      nomination.
+    - **`visits_missing_price` and `visits_unmatched_doctor` are both in
+      `counts`.** `visits_missing_price` explains `visits_incomplete`, which it
+      is now the only cause of. `visits_unmatched_doctor` reports something
+      nothing else does at all: those rows are not flagged and raise no error, so
+      this counter and `imported_doctor_label` are the entire audit trail for an
+      attribution the cards disagreed with. Do not drop it to tidy up, and do not
+      convert it into an `errors` entry — see the flagging bullet above for why
+      that breaks the frontend's file status.
 
 ## Planned — not implemented
 Documented here so nobody assumes these already work.
